@@ -11,3 +11,5 @@ cache/*
 !results/timing/
 .env
 materials
+.litellm_cache
+strange errors.txt
