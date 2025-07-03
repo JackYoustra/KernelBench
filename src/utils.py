@@ -19,6 +19,7 @@ from together import Together
 from openai import OpenAI
 import google.generativeai as genai
 import anthropic
+import litellm
 
 # from datasets import load_dataset
 import numpy as np
@@ -42,6 +43,9 @@ SGLANG_KEY = os.environ.get("SGLANG_API_KEY")  # for Local Deployment
 ANTHROPIC_KEY = os.environ.get("ANTHROPIC_API_KEY")
 SAMBANOVA_API_KEY = os.environ.get("SAMBANOVA_API_KEY")
 FIREWORKS_API_KEY = os.environ.get("FIREWORKS_API_KEY")
+
+# from litellm.caching import Cache
+# litellm.cache = Cache(type="disk")
 
 
 ########################################################
@@ -74,7 +78,7 @@ def set_gpu_arch(arch_list: list[str]):
     """
     Set env variable for torch cuda arch list to build kernels for specified architectures
     """
-    valid_archs = ["Maxwell", "Pascal", "Volta", "Turing", "Ampere", "Hopper", "Ada"]
+    valid_archs = ["Maxwell", "Pascal", "Volta", "Turing", "Ampere", "Hopper", "Ada", "Blackwell"]
     for arch in arch_list:
         if arch not in valid_archs:
             raise ValueError(f"Invalid architecture: {arch}. Must be one of {valid_archs}")
@@ -85,7 +89,7 @@ def query_server(
     prompt: str | list[dict],  # string if normal prompt, list of dicts if chat prompt,
     system_prompt: str = "You are a helpful assistant",  # only used for chat prompts
     temperature: float = 0.0,
-    top_p: float = 1.0, # nucleus sampling
+    top_p: float = 0.95, # nucleus sampling
     top_k: int = 50, 
     max_tokens: int = 128,  # max output tokens to generate
     num_completions: int = 1,
@@ -111,14 +115,17 @@ def query_server(
     - Fireworks (OpenAI compatbility)
     - SGLang (Local Server)
     """
+
+    assert max_tokens >= 4096, "Only support max_tokens >= 4096 for now"
     # Select model and client based on arguments
     match server_type:
         case "sglang":
             url = f"http://{server_address}:{server_port}"
+            print(f"Querying SGLang at {url}")
             client = OpenAI(
                 api_key=SGLANG_KEY, base_url=f"{url}/v1", timeout=None, max_retries=0
             )
-            model = "default"
+            model = model_name
         case "deepseek":
             client = OpenAI(
                 api_key=DEEPSEEK_KEY,
@@ -156,6 +163,11 @@ def query_server(
             
         case "openai":
             client = OpenAI(api_key=OPENAI_KEY)
+            model = model_name
+        case "litellm":
+            # Litellm is a thin wrapper around many provider endpoints and mirrors the OpenAI client schema.
+            # Here we just keep a reference to the module as `client` so we can reuse the unified logic below.
+            client = litellm  # type: ignore
             model = model_name
         case _:
             raise NotImplementedError
@@ -323,8 +335,39 @@ def query_server(
             top_p=top_p,
         )
         outputs = [choice.message.content for choice in response.choices]
+    elif server_type == "litellm":
+        # Litellm follows the OpenAI chat completion schema, returning an object with `.choices` similar to OpenAI.
+        # ignore max_tokens for now
+        response = client.completion(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=temperature,
+            top_p=top_p,
+            # max_tokens=max_tokens,
+            n=num_completions,
+            # caching=True,
+            order=["parasail"],
+            allow_fallback=False
+        )
+        import json
+        print(f"Response: {json.dumps(response, indent=2, default=str)}")
+
+        def transform_reasoning_output(choice):
+            message = choice.message
+            thing = ""
+            if message.reasoning_content is not None and message.reasoning_content != "":
+                thing += f"<think>\n{message.reasoning_content}\n</think>\n"
+            thing += message.content
+            return thing
+
+        outputs = [transform_reasoning_output(choice) for choice in response.choices]
     # for all other kinds of servers, use standard API
     else:
+        assert temperature == 0.6, "Only support temperature 0.6 for now"
+        assert top_p == 0.95, "Only support top_p 0.95 for now"
         if type(prompt) == str:
             response = client.completions.create(
                 model=model,
@@ -348,8 +391,10 @@ def query_server(
 
     # output processing
     if len(outputs) == 1:
+        print(f"Output: {outputs[0]}")
         return outputs[0]
     else:
+        print(f"Outputs: {outputs}")
         return outputs
 
 
@@ -371,10 +416,18 @@ SERVER_PRESETS = {
         "temperature": 0.7,
         "max_tokens": 4096,
     },
+    # "sglang": {  # this is for running locally, mostly for Llama
+    #     # temp from deepseek
+    #     "temperature": 0.6, # human eval pass@N temperature
+    #     "server_port": 30000,
+    #     "server_address": "localhost",
+    #     "max_tokens": 8192,
+    # },
     "sglang": {  # this is for running locally, mostly for Llama
-        "temperature": 0.8, # human eval pass@N temperature
-        "server_port": 10210,
-        "server_address": "matx2.stanford.edu",
+        # temp from deepseek
+        "temperature": 0.6, # human eval pass@N temperature
+        "server_port": 8000,
+        "server_address": "localhost",
         "max_tokens": 8192,
     },
     "anthropic": {  # for Claude 3.5 Sonnet
@@ -392,6 +445,11 @@ SERVER_PRESETS = {
         "model_name": "Meta-Llama-3.1-405B-Instruct",
         "temperature": 0.1,
         "max_tokens": 8192,
+    },
+    "litellm": {
+        "model_name": "gpt-4o-2024-08-06",  # default model through LiteLLM
+        "temperature": 0.0,
+        # "max_tokens": 4096,
     },
 }
 
