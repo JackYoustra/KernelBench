@@ -1,8 +1,8 @@
 services:
   default:
-    image: nvcr.io/nvidia/pytorch:25.06-py3   # ← your exact base image
-    command: sleep infinity                   # keep sandbox alive for Inspect
+    build: .              # <-- Compose will use the Dockerfile above
     init: true
+    command: sleep infinity
 
     # Compose v2+ GPU request (works with plain `docker compose`)
     deploy:
