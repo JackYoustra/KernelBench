@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 from enum import Enum
 from textwrap import dedent
+from typing import Any
 
 from inspect_ai import Task, task
 from inspect_ai.agent import react, agent, Agent, AgentState
@@ -48,7 +49,7 @@ def mean_runtime_of_passes() -> Metric:
     """Average runtime across *successful* samples (ignores failures)."""
 
     def _metric(samples: list[SampleScore]) -> float:
-        runtimes = [s.score.value["runtime"] for s in samples if s.score.value["pass"]]
+        runtimes = [s.score.value for s in samples if isinstance(s.score.value, float)]
         return float(np.mean(runtimes)) if runtimes else float("nan")
 
     return _metric
@@ -58,7 +59,7 @@ def mean_runtime_of_passes() -> Metric:
 
 @scorer(
     metrics={
-        "pass": [accuracy()],
+        "pass": [accuracy(lambda x: 1 if isinstance(x, float) else 0)],
         "runtime": [mean_runtime_of_passes()],
     }
 )
@@ -73,28 +74,21 @@ def kernelbench_score() -> Scorer:
 
     async def _score(state: TaskState, target: Target) -> Score:  # noqa: D401
         # Helper that auto-derives status/pass/runtime from a single argument
-        def _result(outcome: KernelBenchScoreType | float):
-            if isinstance(outcome, float):  # success path
-                return Score(value={
-                    "status": "ok",
-                    "pass": 1,
-                    "runtime": outcome,
-                })
-            else:  # enum failure
-                return Score(value={
-                    "status": outcome.value,
-                    "pass": 0,
-                    "runtime": None,
-                })
+        def _result(outcome: KernelBenchScoreType | float, metadata: dict[str, Any] | None = None):
+            if isinstance(outcome, float):
+                return Score(value=outcome, metadata=metadata)
+            else:
+                return Score(value=outcome.value, metadata=metadata)
 
         try:
             contents = await sandbox().read_file("model_new.py")
         except FileNotFoundError:
             return _result(KernelBenchScoreType.NOT_EXIST)
 
+        metadata = {"contents": contents}
         custom_cuda = extract_first_code(contents, ["python", "cpp"])
         if custom_cuda is None:
-            return _result(KernelBenchScoreType.NOT_EXTRACTED)
+            return _result(KernelBenchScoreType.NOT_EXTRACTED, metadata=metadata)
 
         ref_arch_src = (
             state.input[0] if isinstance(state.input[0], str) else state.input[0].text
@@ -110,10 +104,19 @@ def kernelbench_score() -> Scorer:
             gpu_semaphore=gpu_semaphore,
         )
 
+        # Add result metadata and runtime stats with prefixes
+        if hasattr(result, 'metadata') and result.metadata:
+            for key, value in result.metadata.items():
+                metadata[f"result_{key}"] = value
+        
+        if hasattr(result, 'runtime_stats') and result.runtime_stats:
+            for key, value in result.runtime_stats.items():
+                metadata[f"runtime_{key}"] = value
+
         if not result.compiled:
-            return _result(KernelBenchScoreType.NOT_COMPILES)
+            return _result(KernelBenchScoreType.NOT_COMPILES, metadata=metadata)
         if not result.correctness:
-            return _result(KernelBenchScoreType.NOT_CORRECT)
+            return _result(KernelBenchScoreType.NOT_CORRECT, metadata=metadata)
 
         return _result(result.runtime)
 
@@ -152,20 +155,20 @@ def cudaify_prompt() -> Solver:
 # -----------------------------------------------------------------------------
 
 
-@agent
-def cached_model() -> Agent:
-  async def _cached_model(state: AgentState, tools: list[Tool]) -> AgentState:
-      """Thin agent that forwards to the evaluation model with an *infinite* cache."""
+# @agent
+# def cached_model(state: AgentState, tools: list[Tool]) -> Agent:
+#   async def _cached_model() -> AgentState:
+#       """Thin agent that forwards to the evaluation model with an *infinite* cache."""
 
-      state.output = await get_model().generate(
-          state.messages,
-          tools,
-          cache=CachePolicy(expiry=None),  # never expire cache entries
-      )
-      state.messages.append(state.output.message)
-      return state
+#       state.output = await get_model().generate(
+#           state.messages,
+#           tools,
+#           cache=CachePolicy(expiry=None),  # never expire cache entries
+#       )
+#       state.messages.append(state.output.message)
+#       return state
 
-  return _cached_model
+#   return _cached_model
 
 # -----------------------------------------------------------------------------
 # System messages (ORIGINAL wording) ------------------------------------------
