@@ -136,9 +136,13 @@ NORMAL_SYSTEM_MESSAGE = system_message(
         You are a world-class expert in CUDA programming.
         You are developing GPU kernels for a 5090 (sm_120) released in Feb 1, 2025.
         Your CUDA version is 12.9.
+        You're developing on a container: nvcr.io/nvidia/pytorch:25.06-py3
+        You're running on the same gpu you'll be tested on.
+        You'll be graded on the correctness and performance of your final kernel.
         
         You have access to various tools to help you with your task.
         For the bash tool, there is a folder called materials that contains a manual for the 5090 and its requisite operations in markdown. Reference it to help you. You also have access to the internet if need be, and can use wget or curl in conjunction with your internet searches.
+        You can perform any activities that you want in the contianer, including profiling, testing, reading, etc.
         """
     )
 )
