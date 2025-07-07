@@ -11,7 +11,7 @@ from textwrap import dedent
 from typing import Any
 
 from inspect_ai import Task, task
-from inspect_ai.agent import react, agent, Agent, AgentState
+from inspect_ai.agent import react, agent, Agent, AgentState, AgentAttempts
 from inspect_ai.dataset import FieldSpec, hf_dataset
 from inspect_ai.model import CachePolicy, get_model
 from inspect_ai.solver import (
@@ -38,7 +38,6 @@ from src.utils import extract_first_code, set_gpu_arch
 
 class KernelBenchScoreType(Enum):
     NOT_EXIST = "not_exist"
-    NOT_EXTRACTED = "not_extracted"
     NOT_COMPILES = "not_compiles"
     NOT_CORRECT = "not_correct"
 
@@ -49,6 +48,7 @@ def mean_runtime_of_passes() -> Metric:
     """Average runtime across *successful* samples (ignores failures)."""
 
     def _metric(samples: list[SampleScore]) -> float:
+        # just reducing over floats skipping None
         runtimes = [s.score.value for s in samples if isinstance(s.score.value, float)]
         return float(np.mean(runtimes)) if runtimes else float("nan")
 
@@ -59,7 +59,7 @@ def mean_runtime_of_passes() -> Metric:
 
 @scorer(
     metrics={
-        "pass": [accuracy(lambda x: 1 if isinstance(x, float) else 0)],
+        "pass": [accuracy()],
         "runtime": [mean_runtime_of_passes()],
     }
 )
@@ -76,9 +76,17 @@ def kernelbench_score() -> Scorer:
         # Helper that auto-derives status/pass/runtime from a single argument
         def _result(outcome: KernelBenchScoreType | float, metadata: dict[str, Any] | None = None):
             if isinstance(outcome, float):
-                return Score(value=outcome, metadata=metadata)
+                return Score(value={
+                    "pass": 1,
+                    "runtime": outcome,
+                    "status": "ok",
+                }, metadata=metadata)
             else:
-                return Score(value=outcome.value, metadata=metadata)
+                return Score(value={
+                    "pass": 0,
+                    "runtime": None,
+                    "status": outcome.value,
+                }, metadata=metadata)
 
         try:
             contents = await sandbox().read_file("model_new.py")
@@ -88,7 +96,8 @@ def kernelbench_score() -> Scorer:
         metadata = {"contents": contents}
         custom_cuda = extract_first_code(contents, ["python", "cpp"])
         if custom_cuda is None:
-            return _result(KernelBenchScoreType.NOT_EXTRACTED, metadata=metadata)
+            # just grab the contents of the file
+            custom_cuda = contents
 
         ref_arch_src = (
             state.input[0] if isinstance(state.input[0], str) else state.input[0].text
@@ -122,6 +131,41 @@ def kernelbench_score() -> Scorer:
 
     return _score
 
+async def incorrect_message(state: AgentState, scores: list[Score]) -> str:
+    generic_error_message = "Your submission was incorrect. Please proceed and attempt to find the correct answer."
+    if scores[-1].status == "ok":
+        # ???
+        return generic_error_message
+    else:
+        def errors_to_string() -> str:
+            # grab compile error
+            compile_error = scores[-1].metadata['result_compilation_error']
+            runtime_error = scores[-1].metadata['result_runtime_error']
+            thing = ""
+            if compile_error:
+                thing += f"\nCompile Error: {compile_error}\n"
+            if runtime_error:
+                thing += f"\nRuntime Error: {runtime_error}\n" 
+            return thing
+        
+        def mismatch_to_string() -> str:
+            mismatch = scores[-1].metadata['correctness_issue']
+            thing = ""
+            if mismatch:
+                thing += f"\nCorrectness Issue: {mismatch}\n"
+            return thing
+        
+        # convert to the failure reason enum
+        failure_reason = KernelBenchScoreType(scores[-1].status)
+        match failure_reason:
+            case KernelBenchScoreType.NOT_EXIST:
+                return "The file model_new.py (in the working directory) does not exist. Please create it."
+            case KernelBenchScoreType.NOT_COMPILES:                
+                return f"The file model_new.py does not compile. Please fix the errors.{errors_to_string()}"
+            case KernelBenchScoreType.NOT_CORRECT:
+                return f"The file model_new.py is not correct. Please fix the errors.{errors_to_string()}{mismatch_to_string()}"
+            case _:
+                return generic_error_message
 
 # -----------------------------------------------------------------------------
 # Prompt‑mutation solver -------------------------------------------------------
@@ -135,7 +179,7 @@ def cudaify_prompt() -> Solver:
     # ORIGINAL wording preserved verbatim
     problem_instruction = dedent(
         """
-        Optimize the architecture named Model with custom CUDA operators! Name your optimized output architecture ModelNew. Output the new code in a file called model_new.py in the sandbox that your bash tool has access to.
+        Optimize the architecture named Model with custom CUDA operators! Name your optimized output architecture ModelNew. Output the new code in a file called model_new.py in the WORKING DIRECTORY that your bash and file IO tool has access to.
         """
     )
 
@@ -223,7 +267,10 @@ react_agent = react(
         think(),
         web_search(["openai", "anthropic", "gemini", "perplexity", "exa"]),
     ],
-    attempts=5,
+    attempts=AgentAttempts(
+        attempts=5,
+        incorrect_message=incorrect_message,
+    ),
     # model=cached_model,  # per‑call caching
 )
 
