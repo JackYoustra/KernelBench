@@ -33,6 +33,7 @@ from src.utils import extract_first_code, set_gpu_arch
 # Scorer ----------------------------------------------------------------------
 # -----------------------------------------------------------------------------
 
+
 class KernelBenchScoreType(Enum):
     NOT_EXIST = "not_exist"
     NOT_EXTRACTED = "not_extracted"
@@ -56,7 +57,9 @@ def kernelbench_score() -> Scorer:
             return Score(value=KernelBenchScoreType.NOT_EXTRACTED.value)
 
         # Reference kernel source is the task input (string or Blob)
-        ref_arch_src = state.input[0] if isinstance(state.input[0], str) else state.input[0].text
+        ref_arch_src = (
+            state.input[0] if isinstance(state.input[0], str) else state.input[0].text
+        )
 
         result = await locked_eval_kernel_against_ref(
             ref_arch_src,
@@ -82,15 +85,15 @@ def kernelbench_score() -> Scorer:
 # Prompt‑mutation solver -------------------------------------------------------
 # -----------------------------------------------------------------------------
 
+
 @solver
 def cudaify_prompt() -> Solver:
     """Inject CUDA‑specific optimisation instructions into the user prompt."""
 
+    # ORIGINAL wording preserved verbatim
     problem_instruction = dedent(
         """
-        Optimise the architecture named **Model** with custom CUDA operators! Name
-        your optimised output architecture **ModelNew**. Write the code to a file
-        called *model_new.py* in the sandbox so that the *bash* tool can see it.
+        Optimize the architecture named Model with custom CUDA operators! Name your optimized output architecture ModelNew. Output the new code in a file called model_new.py in the sandbox that your bash tool has access to.
         """
     )
 
@@ -109,6 +112,7 @@ def cudaify_prompt() -> Solver:
 # Cached model wrapper ---------------------------------------------------------
 # -----------------------------------------------------------------------------
 
+
 @agent
 async def cached_model(state, tools):  # type: ignore[override]
     """Thin agent that forwards to the evaluation model with an *infinite* cache."""
@@ -123,17 +127,45 @@ async def cached_model(state, tools):  # type: ignore[override]
 
 
 # -----------------------------------------------------------------------------
+# System messages (ORIGINAL wording) ------------------------------------------
+# -----------------------------------------------------------------------------
+
+NORMAL_SYSTEM_MESSAGE = system_message(
+    dedent(
+        """
+        You are a world-class expert in CUDA programming.
+        You are developing GPU kernels for a 5090 (sm_120) released in Feb 1, 2025.
+        Your CUDA version is 12.9.
+        
+        You have access to various tools to help you with your task.
+        For the bash tool, there is a folder called materials that contains a manual for the 5090 and its requisite operations in markdown. Reference it to help you. You also have access to the internet if need be, and can use wget or curl in conjunction with your internet searches.
+        """
+    )
+)
+
+THINK_SYSTEM_MESSAGE = system_message(
+    dedent(
+        """
+        Use the think tool to think about something. It will not obtain
+        new information or make any changes to the repository, but just
+        log the thought. Use it when complex reasoning or brainstorming
+        is needed. For example, if you explore the repo and discover
+        the source of a bug, call this tool to brainstorm several unique
+        ways of fixing the bug, and assess which change(s) are likely to
+        be simplest and most effective. Alternatively, if you receive
+        some test results, call this tool to brainstorm ways to fix the
+        failing tests.
+        """
+    )
+)
+
+
+# -----------------------------------------------------------------------------
 # ReAct agent (tool loop) ------------------------------------------------------
 # -----------------------------------------------------------------------------
 
+# We rely on the system messages above; no additional prompt needed.
 react_agent = react(
-    prompt=dedent(
-        """
-        You are a world‑class CUDA engineer working on an RTX‑5090 (sm_120)
-        with CUDA 12.9. Use the available tools to craft an optimised *ModelNew*
-        kernel. Remember to place the final code in *model_new.py*.
-        """
-    ),
     tools=[
         bash(timeout=300),
         text_editor(timeout=300),
@@ -149,20 +181,14 @@ react_agent = react(
 # Top‑level solver chain -------------------------------------------------------
 # -----------------------------------------------------------------------------
 
+
 @solver
 def kernelbench_solver() -> Solver:
-    """Compose system guidance, prompt mutation, and the ReAct loop."""
+    """Compose original system guidance, prompt mutation, and the ReAct loop."""
 
     return chain(
-        system_message(
-            dedent(
-                """
-                You are a world‑class expert in CUDA programming.
-                You have a 5090 manual mounted under */materials* and full
-                internet access for reference.
-                """
-            )
-        ),
+        NORMAL_SYSTEM_MESSAGE,
+        THINK_SYSTEM_MESSAGE,
         cudaify_prompt(),
         react_agent,
     )
@@ -171,6 +197,7 @@ def kernelbench_solver() -> Solver:
 # -----------------------------------------------------------------------------
 # Task definition --------------------------------------------------------------
 # -----------------------------------------------------------------------------
+
 
 @task
 def kernelbench_task() -> Task:  # noqa: D401
