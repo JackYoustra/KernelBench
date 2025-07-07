@@ -24,6 +24,7 @@ dependencies = [
 
 [project.optional-dependencies]
 # we want to probably put this in a container at some pt
+# instead of doing profiling on the host
 compile-and-profile = [
   "torch==2.7.0",
   "transformers",
