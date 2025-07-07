@@ -1,0 +1,19 @@
+version: "3.9"
+
+services:
+  default:
+    image: nvcr.io/nvidia/pytorch:25.06-py3   # ← your exact base image
+    command: sleep infinity                   # keep sandbox alive for Inspect
+    init: true
+
+    # Compose v2+ GPU request (works with plain `docker compose`)
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all          # or a number / specific IDs
+              capabilities: [gpu] # generic GPU capability
+              
+    environment:
+      PYTHONUNBUFFERED: "1"
