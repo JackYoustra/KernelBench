@@ -7,14 +7,11 @@ requires-python = ">=3.12,<3.13"
 dependencies = [
   "anthropic",
   "modal",
-  # "numpy",
   "openai",
   "packaging",
   "pydra_config",
-  # "torch==2.7.0",
   "tqdm",
   "datasets",
-  # "transformers",
   "google-generativeai",
   "together",
   "pytest",
@@ -25,13 +22,21 @@ dependencies = [
   "inspect-ai>=0.3.112",
 ]
 
-# [tool.uv.sources]
-# torch = [
-# { index = "pytorch-cu124", marker = "sys_platform != 'darwin'"},
-# ]
+[project.optional-dependencies]
+# we want to probably put this in a container at some pt
+compile-and-profile = [
+  "torch==2.7.0",
+  "transformers",
+]
 
-# [[tool.uv.index]]
-# # Optional name for the index.
-# name = "pytorch"
-# # Required URL for the index.
-# url = "https://download.pytorch.org/whl/128"
+[tool.uv.sources]
+torch = [
+  { index = "pytorch", marker = "sys_platform != 'darwin'"},
+]
+
+[[tool.uv.index]]
+# Optional name for the index.
+name = "pytorch"
+# Required URL for the index.
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
