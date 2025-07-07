@@ -118,7 +118,11 @@ def kernelbench_solver():
       Your CUDA version is 12.9.
                                                   
       You have access to various tools to help you with your task.
-      For the bash tool, there is a folder called materials that contains a manual for the 5090 and its requisite operations in markdown. Reference it to help you. You also have access to the internet if need be, and can use wget or curl in conjunction with your internet searches.
+      For the bash and file operation tools,
+      there is a folder called materials that contains a manual for the 5090
+      and its requisite operations in markdown. Reference it to help you.
+      You also have access to the internet if need be, and can use wget or curl
+      in conjunction with your internet searches.
     """))
 
     think_system_message = system_message(dedent("""
