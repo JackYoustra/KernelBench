@@ -88,12 +88,20 @@ def kernelbench_score() -> Scorer:
                     "status": outcome.value,
                 }, metadata=metadata)
 
+        metadata = {}
+
         try:
             contents = await sandbox().read_file("model_new.py")
         except FileNotFoundError:
-            return _result(KernelBenchScoreType.NOT_EXIST)
+            # sometimes it also puts it in /model_new.py??? Maybe want to penalize it but we'll take it for now.
+            try:
+                contents = await sandbox().read_file("/model_new.py")
+                metadata["contents_path"] = "/model_new.py"
+            except FileNotFoundError:
+                return _result(KernelBenchScoreType.NOT_EXIST)
 
-        metadata = {"contents": contents}
+        metadata["contents"] = contents
+
         custom_cuda = extract_first_code(contents, ["python", "cpp"])
         if custom_cuda is None:
             # just grab the contents of the file
@@ -231,9 +239,9 @@ NORMAL_SYSTEM_MESSAGE = system_message(
         You'll be graded on the correctness and performance of your final kernel.
         
         You have access to various tools to help you with your task.
-        For the bash tool, there is a folder called materials that contains a manual for the 5090 and its requisite operations in markdown.
-        The contents of materials/ is "ptx_isa_8.7.pdf" and it converted to a more easily readable format in materials/conversion_results/ptx_isa_8.7.md.
-        Associated images found in the md are also in the conversion_results/ directory.
+        For the bash tool, there is a read-only folder at /materials that contains a manual for the 5090 and its requisite operations in markdown.
+        The contents of /materials/ is "ptx_isa_8.7.pdf" and it converted to a more easily readable format in /materials/conversion_results/ptx_isa_8.7.md.
+        Associated images found in the md are also in the /materials/conversion_results/ directory.
         Reference it to help you. You also have access to the internet if need be, and can use wget or curl in conjunction with your internet searches.
         You can perform any activities that you want in the contianer, including profiling, testing, reading, etc.
         """
@@ -300,7 +308,7 @@ def kernelbench_solver() -> Solver:
 
 
 @task
-def kernelbench_task() -> Task:  # noqa: D401
+def kernelbench_task() -> Task:
     """Return the KernelBench Task object."""
 
     dataset = hf_dataset(
@@ -312,10 +320,6 @@ def kernelbench_task() -> Task:  # noqa: D401
             metadata=["name", "level"],
         ),
     )
-
-    # Mount reference materials inside the sandbox
-    for sample in dataset:
-        sample.files = {"materials": "../materials"}
 
     return Task(
         dataset=dataset,

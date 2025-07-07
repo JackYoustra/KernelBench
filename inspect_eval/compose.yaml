@@ -4,6 +4,9 @@ services:
     init: true
     command: sleep infinity
 
+    volumes:
+      - ../materials:/materials:ro
+
     # Compose v2+ GPU request (works with plain `docker compose`)
     deploy:
       resources:
