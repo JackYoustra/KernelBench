@@ -133,14 +133,16 @@ def kernelbench_score() -> Scorer:
 
 async def incorrect_message(state: AgentState, scores: list[Score]) -> str:
     generic_error_message = "Your submission was incorrect. Please proceed and attempt to find the correct answer."
-    if scores[-1].status == "ok":
+    last_value = scores[-1].value
+    last_metadata = scores[-1].metadata
+    if last_value["pass"] == 1:
         # ???
         return generic_error_message
     else:
         def errors_to_string() -> str:
             # grab compile error
-            compile_error = scores[-1].metadata['result_compilation_error']
-            runtime_error = scores[-1].metadata['result_runtime_error']
+            compile_error = last_metadata['result_compilation_error']
+            runtime_error = last_metadata['result_runtime_error']
             thing = ""
             if compile_error:
                 thing += f"\nCompile Error: {compile_error}\n"
@@ -149,14 +151,14 @@ async def incorrect_message(state: AgentState, scores: list[Score]) -> str:
             return thing
         
         def mismatch_to_string() -> str:
-            mismatch = scores[-1].metadata['correctness_issue']
+            mismatch = last_metadata['correctness_issue']
             thing = ""
             if mismatch:
                 thing += f"\nCorrectness Issue: {mismatch}\n"
             return thing
         
         # convert to the failure reason enum
-        failure_reason = KernelBenchScoreType(scores[-1].status)
+        failure_reason = KernelBenchScoreType(last_value["status"])
         match failure_reason:
             case KernelBenchScoreType.NOT_EXIST:
                 return "The file model_new.py (in the working directory) does not exist. Please create it."
