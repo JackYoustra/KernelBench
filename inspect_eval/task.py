@@ -10,7 +10,7 @@ from enum import Enum
 from textwrap import dedent
 
 from inspect_ai import Task, task
-from inspect_ai.agent import react, agent
+from inspect_ai.agent import react, agent, Agent, AgentState
 from inspect_ai.dataset import FieldSpec, hf_dataset
 from inspect_ai.model import CachePolicy, get_model
 from inspect_ai.solver import (
@@ -21,9 +21,10 @@ from inspect_ai.solver import (
     TaskState,
     Solver,
 )
-from inspect_ai.scorer import Score, Target, Scorer
-from inspect_ai.tool import bash, text_editor, think, web_search
+from inspect_ai.scorer import Score, Target, Scorer, scorer, accuracy, metric, Metric, SampleScore
+from inspect_ai.tool import bash, text_editor, think, web_search, Tool
 from inspect_ai.util import sandbox
+import numpy as np
 
 from src.eval import locked_eval_kernel_against_ref
 from src.prompt_constructor import prompt_generate_custom_cuda_from_prompt_template
@@ -40,23 +41,61 @@ class KernelBenchScoreType(Enum):
     NOT_COMPILES = "not_compiles"
     NOT_CORRECT = "not_correct"
 
+# -- custom metric ------------------------------------------------------------
 
+@metric
+def mean_runtime_of_passes() -> Metric:
+    """Average runtime across *successful* samples (ignores failures)."""
+
+    def _metric(samples: list[SampleScore]) -> float:
+        runtimes = [s.score.value["runtime"] for s in samples if s.score.value["pass"]]
+        return float(np.mean(runtimes)) if runtimes else float("nan")
+
+    return _metric
+
+
+# -- scorer factory -----------------------------------------------------------
+
+@scorer(
+    metrics={
+        "pass": [accuracy()],
+        "runtime": [mean_runtime_of_passes()],
+    }
+)
 def kernelbench_score() -> Scorer:
-    """Return a scorer that grades CUDA kernels for correctness and runtime."""
+    """Scorer that returns either a *float* (runtime ⇒ success) or an enum.
 
-    gpu_semaphore = asyncio.Semaphore(1)  # only run one kernel at a time
+    * Float → successful run; `pass=1`, `status="ok"`, `runtime=float`.
+    * `KernelBenchScoreType` → failure code; `pass=0`, `runtime=None`.
+    """
+
+    gpu_semaphore = asyncio.Semaphore(1)
 
     async def _score(state: TaskState, target: Target) -> Score:  # noqa: D401
+        # Helper that auto-derives status/pass/runtime from a single argument
+        def _result(outcome: KernelBenchScoreType | float):
+            if isinstance(outcome, float):  # success path
+                return Score(value={
+                    "status": "ok",
+                    "pass": 1,
+                    "runtime": outcome,
+                })
+            else:  # enum failure
+                return Score(value={
+                    "status": outcome.value,
+                    "pass": 0,
+                    "runtime": None,
+                })
+
         try:
             contents = await sandbox().read_file("model_new.py")
         except FileNotFoundError:
-            return Score(value=KernelBenchScoreType.NOT_EXIST.value)
+            return _result(KernelBenchScoreType.NOT_EXIST)
 
         custom_cuda = extract_first_code(contents, ["python", "cpp"])
         if custom_cuda is None:
-            return Score(value=KernelBenchScoreType.NOT_EXTRACTED.value)
+            return _result(KernelBenchScoreType.NOT_EXTRACTED)
 
-        # Reference kernel source is the task input (string or Blob)
         ref_arch_src = (
             state.input[0] if isinstance(state.input[0], str) else state.input[0].text
         )
@@ -72,11 +111,11 @@ def kernelbench_score() -> Scorer:
         )
 
         if not result.compiled:
-            return Score(value=KernelBenchScoreType.NOT_COMPILES.value)
+            return _result(KernelBenchScoreType.NOT_COMPILES)
         if not result.correctness:
-            return Score(value=KernelBenchScoreType.NOT_CORRECT.value)
+            return _result(KernelBenchScoreType.NOT_CORRECT)
 
-        return Score(value=result.runtime)
+        return _result(result.runtime)
 
     return _score
 
@@ -114,17 +153,19 @@ def cudaify_prompt() -> Solver:
 
 
 @agent
-async def cached_model(state, tools):  # type: ignore[override]
-    """Thin agent that forwards to the evaluation model with an *infinite* cache."""
+def cached_model() -> Agent:
+  async def _cached_model(state: AgentState, tools: list[Tool]) -> AgentState:
+      """Thin agent that forwards to the evaluation model with an *infinite* cache."""
 
-    state.output = await get_model().generate(
-        state.messages,
-        tools,
-        cache=CachePolicy(expiry=None),  # never expire cache entries
-    )
-    state.messages.append(state.output.message)
-    return state
+      state.output = await get_model().generate(
+          state.messages,
+          tools,
+          cache=CachePolicy(expiry=None),  # never expire cache entries
+      )
+      state.messages.append(state.output.message)
+      return state
 
+  return _cached_model
 
 # -----------------------------------------------------------------------------
 # System messages (ORIGINAL wording) ------------------------------------------
@@ -141,7 +182,10 @@ NORMAL_SYSTEM_MESSAGE = system_message(
         You'll be graded on the correctness and performance of your final kernel.
         
         You have access to various tools to help you with your task.
-        For the bash tool, there is a folder called materials that contains a manual for the 5090 and its requisite operations in markdown. Reference it to help you. You also have access to the internet if need be, and can use wget or curl in conjunction with your internet searches.
+        For the bash tool, there is a folder called materials that contains a manual for the 5090 and its requisite operations in markdown.
+        The contents of materials/ is "ptx_isa_8.7.pdf" and it converted to a more easily readable format in materials/conversion_results/ptx_isa_8.7.md.
+        Associated images found in the md are also in the conversion_results/ directory.
+        Reference it to help you. You also have access to the internet if need be, and can use wget or curl in conjunction with your internet searches.
         You can perform any activities that you want in the contianer, including profiling, testing, reading, etc.
         """
     )
@@ -177,7 +221,7 @@ react_agent = react(
         web_search(["openai", "anthropic", "gemini", "perplexity", "exa"]),
     ],
     attempts=5,
-    model=cached_model,  # per‑call caching
+    # model=cached_model,  # per‑call caching
 )
 
 
@@ -219,11 +263,11 @@ def kernelbench_task() -> Task:  # noqa: D401
 
     # Mount reference materials inside the sandbox
     for sample in dataset:
-        sample.files = {"materials": "materials"}
+        sample.files = {"materials": "../materials"}
 
     return Task(
         dataset=dataset,
         solver=kernelbench_solver(),
         sandbox="docker",
-        scorer=kernelbench_score,
+        scorer=kernelbench_score(),
     )
