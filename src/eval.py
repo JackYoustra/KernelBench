@@ -2,6 +2,7 @@
 Helpers for Evaluations
 """
 
+import asyncio
 import requests
 import torch
 import torch.nn as nn
@@ -456,6 +457,174 @@ def eval_kernel_against_ref(
 
     graceful_eval_cleanup(context, device)
     return kernel_exec_result
+
+async def locked_eval_kernel_against_ref(
+    original_model_src: str,
+    custom_model_src: str,
+    seed_num: int = 42,
+    num_correct_trials: int = 1,
+    num_perf_trials: int = 10,
+    verbose: bool = False,
+    measure_performance: bool = False,
+    build_dir: os.PathLike = None,
+    gpu_semaphore: asyncio.Semaphore = None,
+    device: torch.device = torch.cuda.current_device() if torch.cuda.is_available() else None, # have to run on GPU
+) -> KernelExecResult:
+    """
+    Evaluate the custom kernel against the original model
+
+    num_correct_trials: number of trials to initialize different random inputs; correctness pass only if all trials pass
+    num_perf_trials: run the evalutation many times to take the average
+    device: GPU (cuda) device to run the evalutation on
+    """
+    # TODO: check device is busy
+    assert torch.cuda.is_available(), "CUDA is not available, cannot run Eval"
+    torch.set_printoptions(
+        precision=4,  # Decimal places
+        threshold=10,  # Total number of elements before truncating
+        edgeitems=3,  # Number of elements at beginning and end of dimensions
+        linewidth=80,  # Maximum width before wrapping
+    )
+
+    # set CUDA device
+    torch.cuda.set_device(device)
+
+    context = {}
+
+    if verbose:
+        print(f"[Eval] Start Evalulation! on device: {device}")
+        print("[Eval] Loading Original Model")
+
+    Model, get_init_inputs, get_inputs = load_original_model_and_inputs(
+        original_model_src, context
+    )
+    set_seed(seed_num)  # set seed for reproducible input
+    init_inputs = get_init_inputs()
+    init_inputs = [
+        x.cuda(device=device) if isinstance(x, torch.Tensor) else x for x in init_inputs
+    ]
+
+    with torch.no_grad():
+        set_seed(seed_num)  # set seed for reproducible weights
+        original_model = Model(*init_inputs)
+        assert hasattr(original_model, "forward")
+        if verbose:
+            print("[Eval] Original Model Loaded")
+    if verbose:
+        print("[Eval] Loading and Compiling New Model with Custom CUDA Kernel")
+
+    metadata = {}  # for storing result metadata
+    metadata["hardware"] = torch.cuda.get_device_name(device=device)
+    metadata["device"] = str(device)  # for debugging
+
+    # this is where compilation happens
+    try:
+        os.environ["TORCH_USE_CUDA_DSA"] = "1"  # compile with device side assertion
+        # add hash for later to distinguish between multi-turn kernels
+        ModelNew = load_custom_model(custom_model_src, context, build_dir)
+        torch.cuda.synchronize(device=device)  # not sure if this is too much
+    except Exception as e:
+        print(
+            f"Failed to compile custom CUDA kernel: Record as compilation failure. \nError: {e}"
+        )
+        # TODO: add metadata for compilation error (how to we get the compilation error message?)
+
+        if "lock" in str(e) or "No such file or directory" in str(e):
+            # this is a lock file error, likely due to concurrent compilation
+            # this does not necessarily mean the compilation failed, but we should retry
+            print(
+                f"[Eval] Lock file error during compilation, Please retry. Error: {e}"
+            )
+            graceful_eval_cleanup(context, device)
+            return None
+        else:
+            metadata["compilation_error"] = e
+            graceful_eval_cleanup(context, device)
+            return KernelExecResult(
+                compiled=False, metadata=metadata
+            )  # skip further steps
+
+    # at this point we passed compilation
+    async with gpu_semaphore:
+        try:
+            with torch.no_grad():
+                set_seed(seed_num)  # set seed for reproducible weights
+                custom_model = ModelNew(*init_inputs)
+                assert hasattr(custom_model, "forward")
+                torch.cuda.synchronize(device=device)
+            if verbose:
+                print("[Eval] New Model with Custom CUDA Kernel Loaded")
+        except RuntimeError as e:
+            print(
+                f"Failed to load custom CUDA kernel; Compiled but not able to run, count as runtime error. \nError: {e}"
+            )
+            # TODO: add metadata for runtime error e.g. error in launching kernel, illegal memory access, ...
+            graceful_eval_cleanup(context, device)
+            metadata["runtime_error"] = e
+            return KernelExecResult(
+                compiled=True, correctness=False, metadata=metadata
+            )  # skip further steps
+
+        kernel_exec_result = None
+
+        # Check Correctness
+        if verbose:
+            print("[Eval] Checking Correctness")
+        try:
+            kernel_exec_result = run_and_check_correctness(
+                original_model,
+                custom_model,
+                get_inputs,
+                metadata=metadata,
+                num_correct_trials=num_correct_trials,
+                verbose=verbose,
+                seed=seed_num,
+                device=device,
+            )
+        except Exception as e:
+            # TODO: add metadata for runtime error e.g. error in launching kernel, illegal memory access, ...
+            metadata["runtime_error"] = e
+            kernel_exec_result = KernelExecResult(
+                compiled=True, correctness=False, metadata=metadata
+            )
+
+        # Measure Performance [Optional] | conditioned on compilation + correctness + no exception so far
+        if measure_performance:
+            try:
+                if kernel_exec_result and kernel_exec_result.correctness:
+                    if verbose:
+                        print("[Eval] Measuring Performance as Sample is Correct")
+
+                    torch.cuda.synchronize(device=device)
+                    set_seed(seed_num)
+                    inputs = get_inputs()
+                    inputs = [
+                        x.cuda(device=device) if isinstance(x, torch.Tensor) else x
+                        for x in inputs
+                    ]
+                    model_new = custom_model.cuda(device=device)
+                    torch.cuda.synchronize(device=device)
+
+                    elapsed_times = time_execution_with_cuda_event(
+                        model_new,
+                        *inputs,
+                        num_trials=num_perf_trials,
+                        verbose=verbose,
+                        device=device,
+                    )
+                    runtime_stats = get_timing_stats(elapsed_times, device=device)
+
+                    if verbose:
+                        print(f"[Eval] Performance Stats: {runtime_stats}")
+                    kernel_exec_result.runtime = runtime_stats["mean"]
+                    kernel_exec_result.runtime_stats = runtime_stats
+            except Exception as e:
+                if verbose:
+                    print(f"[Eval] Error in Measuring Performance: {e}")
+                kernel_exec_result.metadata["error_during_performance"] = e
+
+        graceful_eval_cleanup(context, device)
+        return kernel_exec_result
 
 
 def register_and_format_exception(

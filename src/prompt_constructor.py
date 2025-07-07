@@ -36,7 +36,7 @@ def get_arch_definition(arch_src):
 # CUDA Prompt
 ############################################
 PROBLEM_STATEMENT = """You write custom CUDA kernels to replace the pytorch operators in the given architecture to get speedups. \n
-    You have complete freedom to choose the set of operators you want to replace. You may make the decision to replace some operators with custom CUDA kernels and leave others unchanged. You may replace multiple operators with custom implementations, consider operator fusion opportunities (combining multiple operators into a single kernel, for example, combining matmul+relu), or algorithmic changes (such as online softmax). You are only limited by your imagination.\n
+You have complete freedom to choose the set of operators you want to replace. You may make the decision to replace some operators with custom CUDA kernels and leave others unchanged. You may replace multiple operators with custom implementations, consider operator fusion opportunities (combining multiple operators into a single kernel, for example, combining matmul+relu), or algorithmic changes (such as online softmax). You are only limited by your imagination.\n
 """
 PROBLEM_INSTRUCTION = """
 Optimize the architecture named Model with custom CUDA operators! Name your optimized output architecture ModelNew. Output the new code in codeblocks. Please generate real code, NOT pseudocode, make sure the code compiles and is fully functional. Just output the new model code, no other text, and NO testing code! \n
@@ -44,9 +44,11 @@ Optimize the architecture named Model with custom CUDA operators! Name your opti
 
 
 def prompt_generate_custom_cuda(
-    arc_src: str, example_arch_src: str, example_new_arch_src: str
+    arc_src: str, example_arch_src: str, example_new_arch_src: str, 
+    problem_statement: str = PROBLEM_STATEMENT,
+    problem_instruction: str = PROBLEM_INSTRUCTION
 ) -> str:
-    prompt = PROBLEM_STATEMENT
+    prompt = problem_statement
 
     if example_arch_src != "" and example_new_arch_src != "":
         prompt += f"""
@@ -66,7 +68,7 @@ def prompt_generate_custom_cuda(
     {arc_src}
     ```
     """
-    prompt += PROBLEM_INSTRUCTION
+    prompt += problem_instruction
     return prompt
 
 
@@ -316,7 +318,7 @@ def prompt_generate_custom_cuda_from_file_one_example(ref_arch_src, example_ind=
     return prompt_generate_custom_cuda(arch, example_arch, example_new_arch)
 
 
-def prompt_generate_custom_cuda_from_prompt_template(ref_arch_src: str) -> str:
+def prompt_generate_custom_cuda_from_prompt_template(ref_arch_src: str, problem_statement: str = PROBLEM_STATEMENT, problem_instruction: str = PROBLEM_INSTRUCTION) -> str:
     """
     Using prompt example (an element-wise addition) for prompt templates
     The most basic form of example just to show LLM the task and the expected output format
@@ -344,7 +346,7 @@ def prompt_generate_custom_cuda_from_prompt_template(ref_arch_src: str) -> str:
     example_arch = read_file(example_arch_path)
     example_new_arch = read_file(example_new_arch_path)
 
-    return prompt_generate_custom_cuda(arch, example_arch, example_new_arch)
+    return prompt_generate_custom_cuda(arch, example_arch, example_new_arch, problem_statement, problem_instruction)
 
 
 def prompt_generate_prompt_with_hardware_info_from_template(ref_arch_src: str, gpu_name: str) -> str:

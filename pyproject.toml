@@ -1,0 +1,37 @@
+[project]
+name = "kernelbench"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "anthropic",
+  "modal",
+  # "numpy",
+  "openai",
+  "packaging",
+  "pydra_config",
+  # "torch==2.7.0",
+  "tqdm",
+  "datasets",
+  # "transformers",
+  "google-generativeai",
+  "together",
+  "pytest",
+  "ninja",
+  "archon-ai",
+  "einops",
+  "litellm",
+  "inspect-ai>=0.3.112",
+]
+
+# [tool.uv.sources]
+# torch = [
+# { index = "pytorch-cu124", marker = "sys_platform != 'darwin'"},
+# ]
+
+# [[tool.uv.index]]
+# # Optional name for the index.
+# name = "pytorch"
+# # Required URL for the index.
+# url = "https://download.pytorch.org/whl/128"
