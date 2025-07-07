@@ -41,3 +41,11 @@ name = "pytorch"
 # Required URL for the index.
 url = "https://download.pytorch.org/whl/cu128"
 explicit = true
+
+# compatibility with setup.py
+[build-system]               # ←--- tells uv “this *is* a package”
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]            # let setuptools discover the top-level dir “src”
+packages = ["src"]           # simplest because your top folder really *is* the package

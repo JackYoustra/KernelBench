@@ -4,6 +4,7 @@ from enum import Enum
 from inspect_ai import Task, task
 from inspect_ai.agent import react
 from inspect_ai.dataset import FieldSpec, hf_dataset
+from inspect_ai.model import CachePolicy
 from inspect_ai.solver import generate, solver, system_message, use_tools, TaskState, Solver, Generate
 from inspect_ai.scorer import Score, Target, Scorer
 from inspect_ai.tool import bash, text_editor, think, web_search
@@ -143,7 +144,7 @@ def kernelbench_solver():
           think(),
           web_search(["openai", "anthropic", "gemini", "perplexity", "exa"])
         ]),
-        generate(),
+        generate(cache=CachePolicy(expiry=None)),
       ],
       attempts=5
     )
@@ -153,12 +154,14 @@ def kernelbench_task():
     dataset = hf_dataset(
         "ScalingIntelligence/KernelBench",
         split="level_2",
-        field_specs=[
-            FieldSpec(name="code", type=str),
-            FieldSpec(name="name", type=str),
-            FieldSpec(name="problem_id", type=int),
-            FieldSpec(name="level", type=int),
-        ]
+        sample_fields=FieldSpec(
+          input="code",
+          id="problem_id",
+          metadata=[
+              "name",
+              "level"
+          ]
+        )
     )
 
     for sample in dataset:
