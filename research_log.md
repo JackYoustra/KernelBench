@@ -1,4 +1,4 @@
-# Research Proposal: Learning to Optimize GPU Kernels through Profiler-Guided Reinforcement Learning
+# Research Proposal: Learning to Optimize GPU Kernels through Profiler-Guided Reinforcement Learning (Name: Kernel Mustard - thx dad)
 
 ## Abstract
 
@@ -203,3 +203,11 @@ Todo:
  - Evaluate the results
  - Write the paper
  - Write the blog post
+
+
+
+We're going to be following the deepseek methodology. Because 0528 is already a strong reasoninb model, we start at the stage where we want to perform rejection sampling (SFT) from a frontier model
+and only after that do RL.
+
+Looks like we're going to distill from r1 0528: https://www.reddit.com/r/LocalLLaMA/comments/1kya3c2/deepseek_r11_dominates_gemini_25_flash_on_price/
+
