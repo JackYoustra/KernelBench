@@ -107,19 +107,24 @@ def kernelbench_score() -> Scorer:
             # just grab the contents of the file
             custom_cuda = contents
 
-        ref_arch_src = (
-            state.input[0] if isinstance(state.input[0], str) else state.input[0].text
-        )
+        
+        ref_arch_src = state.metadata["code"]
+        print("ref_arch_src")
+        print(ref_arch_src)
 
-        result = await locked_eval_kernel_against_ref(
-            ref_arch_src,
-            custom_cuda,
-            verbose=True,
-            measure_performance=True,
-            num_correct_trials=5,
-            num_perf_trials=100,
-            gpu_semaphore=gpu_semaphore,
-        )
+        try:
+            result = await locked_eval_kernel_against_ref(
+                ref_arch_src,
+                custom_cuda,
+                verbose=True,
+                measure_performance=True,
+                num_correct_trials=5,
+                num_perf_trials=100,
+                gpu_semaphore=gpu_semaphore,
+            )
+        except Exception as e:
+            metadata["result_compilation_error"] = str(e)
+            return _result(KernelBenchScoreType.NOT_COMPILES, metadata=metadata)
 
         # Add result metadata and runtime stats with prefixes
         if hasattr(result, 'metadata') and result.metadata:
@@ -149,9 +154,12 @@ async def incorrect_message(state: AgentState, scores: list[Score]) -> str:
     else:
         def errors_to_string() -> str:
             # grab compile error
-            compile_error = last_metadata['result_compilation_error']
-            runtime_error = last_metadata['result_runtime_error']
+            compile_log = last_metadata['result_compile_log'] if 'result_compile_log' in last_metadata else None
+            compile_error = last_metadata['result_compilation_error'] if 'result_compilation_error' in last_metadata else None
+            runtime_error = last_metadata['result_runtime_error'] if 'result_runtime_error' in last_metadata else None
             thing = ""
+            if compile_log:
+                thing += f"\nCompile Log: {compile_log}\n"
             if compile_error:
                 thing += f"\nCompile Error: {compile_error}\n"
             if runtime_error:
@@ -169,7 +177,7 @@ async def incorrect_message(state: AgentState, scores: list[Score]) -> str:
         failure_reason = KernelBenchScoreType(last_value["status"])
         match failure_reason:
             case KernelBenchScoreType.NOT_EXIST:
-                return "The file model_new.py (in the working directory) does not exist. Please create it."
+                return "The file model_new.py (that would be revealed by ls model_new.py) does not exist. Please create it."
             case KernelBenchScoreType.NOT_COMPILES:                
                 return f"The file model_new.py does not compile. Please fix the errors.{errors_to_string()}"
             case KernelBenchScoreType.NOT_CORRECT:
@@ -189,7 +197,7 @@ def cudaify_prompt() -> Solver:
     # ORIGINAL wording preserved verbatim
     problem_instruction = dedent(
         """
-        Optimize the architecture named Model with custom CUDA operators! Name your optimized output architecture ModelNew. Output the new code in a file called model_new.py in the WORKING DIRECTORY that your bash and file IO tool has access to.
+        Optimize the architecture named Model with custom CUDA operators! Name your optimized output architecture ModelNew. Output the new code in a file called model_new.py in the directory that your shell (and file IO tool) starts in - so writing to `model_new.py` will write to the correct file, while writing elsewhere (such as top level) will not.
         """
     )
 
@@ -237,6 +245,11 @@ NORMAL_SYSTEM_MESSAGE = system_message(
         You're developing on a container: nvcr.io/nvidia/pytorch:25.06-py3
         You're running on the same gpu you'll be tested on.
         You'll be graded on the correctness and performance of your final kernel.
+
+        An example compile command used by pytorch in the inline compile process is:
+        /usr/local/cuda/bin/nvcc --generate-dependencies-with-compile --dependency-output cuda.cuda.o.d -DTORCH_EXTENSION_NAME=model_kernels -DTORCH_API_INCLUDE_EXTENSION_H -DPYBIND11_COMPILER_TYPE=\"_gcc\" -DPYBIND11_STDLIB=\"_libstdcpp\" -DPYBIND11_BUILD_ABI=\"_cxxabi1016\" -isystem <redacted>/.venv/lib/python3.12/site-packages/torch/include -isystem <redacted>/.venv/lib/python3.12/site-packages/torch/include/torch/csrc/api/include -isystem /usr/local/cuda/include -isystem /usr/include/python3.12 -D_GLIBCXX_USE_CXX11_ABI=1 -D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__ -D__CUDA_NO_BFLOAT16_CONVERSIONS__ -D__CUDA_NO_HALF2_OPERATORS__ --expt-relaxed-constexpr -gencode=arch=compute_120,code=compute_120 -gencode=arch=compute_120,code=sm_120 --compiler-options '-fPIC' -std=c++17 -c <redacted>/.cache/torch_extensions/py312_cu128/model_kernels/cuda.cu -o cuda.cuda.o
+
+        Note: DO NOT ADD CUSTOM GENCODE FLAGS TO THE INLINE PYTORCH COMMAND. ALL OF THE ABOVE FLAGS ARE AUTOMATICALLY DONE FOR YOU.
         
         You have access to various tools to help you with your task.
         For the bash tool, there is a read-only folder at /materials that contains a manual for the 5090 and its requisite operations in markdown.
@@ -269,13 +282,22 @@ THINK_SYSTEM_MESSAGE = system_message(
 # ReAct agent (tool loop) ------------------------------------------------------
 # -----------------------------------------------------------------------------
 
+search_tool = web_search({
+    "openai":       True,
+    "anthropic":    True,
+    "gemini":       True,
+    "perplexity":   True,
+
+    "exa": {"text": True}         # ← forces Exa to include the citation text field, will crash if not found
+})
+
 # We rely on the system messages above; no additional prompt needed.
 react_agent = react(
     tools=[
         bash(timeout=300),
         text_editor(timeout=300),
         think(),
-        web_search(["openai", "anthropic", "gemini", "perplexity", "exa"]),
+        search_tool,
     ],
     attempts=AgentAttempts(
         attempts=5,
@@ -317,7 +339,7 @@ def kernelbench_task() -> Task:
         sample_fields=FieldSpec(
             input="code",
             id="problem_id",
-            metadata=["name", "level"],
+            metadata=["name", "level", "code"],
         ),
     )
 
