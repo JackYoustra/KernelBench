@@ -48,8 +48,13 @@ def mean_runtime_of_passes() -> Metric:
     """Average runtime across *successful* samples (ignores failures)."""
 
     def _metric(samples: list[SampleScore]) -> float:
-        # just reducing over floats skipping None
-        runtimes = [s.score.value for s in samples if isinstance(s.score.value, float)]
+        # When using metrics dict, the system extracts the specific key value
+        # so s.score.value will be the runtime value (float or None), not the full dict
+        runtimes = [
+            s.score.value
+            for s in samples
+            if isinstance(s.score.value, (int, float)) and s.score.value is not None
+        ]
         return float(np.mean(runtimes)) if runtimes else float("nan")
 
     return _metric
