@@ -86,6 +86,10 @@ class KernelExecResult(BaseModel):
     runtime: float = -1.0  # in us, only recorded if we decide to measure performance
     runtime_stats: dict = {}  # only recorded if we decide to measure performance
 
+# make a result for original failure / note to skip
+# just have it be a sentinel
+class OriginalFailureResult(BaseModel):
+    pass
 
 def load_original_model_and_inputs(
     model_original_src: str, context: dict
@@ -95,17 +99,18 @@ def load_original_model_and_inputs(
     this is pytorch reference and we feed that to model to see if there will be any improvement
     """
 
+    # Note: NEITHER OF THESE SHOULD FAIL - if they do, it's an invalid sample
     try:
         compile(model_original_src, "<string>", "exec")
     except SyntaxError as e:
         print(f"Syntax Error in original code {e}")
-        return None
+        raise OriginalFailureResult()
 
     try:
         exec(model_original_src, context)  # expose to current namespace
     except Exception as e:
         print(f"Error in executing original code {e}")
-        return None
+        raise OriginalFailureResult()
 
     # these should be defined in the original model code and present in the context
     get_init_inputs_fn = context.get("get_init_inputs")
@@ -361,6 +366,7 @@ def eval_kernel_against_ref(
             f"Failed to compile custom CUDA kernel: Record as compilation failure. \nError: {e}"
         )
         # TODO: add metadata for compilation error (how to we get the compilation error message?)
+        metadata["compilation_error"] = e
 
         if "lock" in str(e) or "No such file or directory" in str(e):
             # this is a lock file error, likely due to concurrent compilation
@@ -528,6 +534,7 @@ async def locked_eval_kernel_against_ref(
             f"Failed to compile custom CUDA kernel: Record as compilation failure. \nError: {e}"
         )
         # TODO: add metadata for compilation error (how to we get the compilation error message?)
+        metadata["compilation_error"] = e
 
         if "lock" in str(e) or "No such file or directory" in str(e):
             # this is a lock file error, likely due to concurrent compilation
