@@ -211,3 +211,19 @@ and only after that do RL.
 
 Looks like we're going to distill from r1 0528: https://www.reddit.com/r/LocalLLaMA/comments/1kya3c2/deepseek_r11_dominates_gemini_25_flash_on_price/
 
+Okay, finally got the default tool use ReAct loop working! It's able to use its tools to create a kernel and debug it if needed.
+Unfortunately, it wonly works for big qwen. 0528 doesn't use the tools correctly!
+We'll try and figure it out using gaia, a useful tool-following benchmark, and see if it's specific to our benchmark or not.
+GAIA fails too, and asking the model in cursor to use ls yields a refusal. It looks like tool use is right out of 0528!
+
+So we probably want to do our rejection sampling either from Qwen3 235B or Gemini Flash (or maybe both) (I'm too broke for pro / sonnet 4 for now).
+Flash costs 2-3 times as much as qwen3 235b, but it has a much larger context window.
+Because we're going to be distilling into a qwen-based model
+either 0528 8b in a frankenstein thing where we train both tool use AND specific reasoning at the same time
+or a much more conventional 30a3 or 8b instruct.
+We have a choice: the 235b will essentially be closer to on-policy distillation while flash will be a completely different model and training process.
+
+I'm thinking it's something like leverage Qwen-3 235 B for cost-efficient, on-policy, stable tool calls and bring in Gemini 2.5 Flash selectively for its ultra-long context and alternative reasoning style,
+so we're probably going to want to do predominantly 235B.
+
+Okay. Now that I've got the full ReAct loop working, I think it's time to read the sakana paper very closely and see what they did and what we should adapt from the blog posts before we let 'er rip.
