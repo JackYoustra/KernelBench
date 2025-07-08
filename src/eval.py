@@ -15,6 +15,8 @@ from contextlib import redirect_stdout, redirect_stderr
 from io import StringIO
 import sys
 
+from src.torch_compile import CompilationFailure, compile_kernel
+
 from . import utils
 
 REPO_TOP_PATH = os.path.abspath(
@@ -295,8 +297,6 @@ def build_compile_cache_with_capturing(
     return returncode, stdout.decode('utf-8'), stderr.decode('utf-8')
 
 
-
-
 def eval_kernel_against_ref(
     original_model_src: str,
     custom_model_src: str,
@@ -525,31 +525,15 @@ async def locked_eval_kernel_against_ref(
 
     # this is where compilation happens
     try:
-        os.environ["TORCH_USE_CUDA_DSA"] = "1"  # compile with device side assertion
-        # add hash for later to distinguish between multi-turn kernels
-        ModelNew = load_custom_model(custom_model_src, context, build_dir)
-        torch.cuda.synchronize(device=device)  # not sure if this is too much
-    except Exception as e:
-        print(
-            f"Failed to compile custom CUDA kernel: Record as compilation failure. \nError: {e}"
+        ModelNew, compile_log = compile_kernel(
+            load_custom_model, custom_model_src, context, build_dir, device
         )
-        # TODO: add metadata for compilation error (how to we get the compilation error message?)
-        metadata["compilation_error"] = e
-
-        if "lock" in str(e) or "No such file or directory" in str(e):
-            # this is a lock file error, likely due to concurrent compilation
-            # this does not necessarily mean the compilation failed, but we should retry
-            print(
-                f"[Eval] Lock file error during compilation, Please retry. Error: {e}"
-            )
-            graceful_eval_cleanup(context, device)
-            return None
-        else:
-            metadata["compilation_error"] = e
-            graceful_eval_cleanup(context, device)
-            return KernelExecResult(
-                compiled=False, metadata=metadata
-            )  # skip further steps
+        metadata["compile_log"] = compile_log
+    except CompilationFailure as exc:
+        metadata["compile_log"]      = exc.compile_log
+        metadata["compilation_error"] = str(exc)
+        graceful_eval_cleanup(context, device)
+        return KernelExecResult(compiled=False, metadata=metadata)
 
     # at this point we passed compilation
     async with gpu_semaphore:
