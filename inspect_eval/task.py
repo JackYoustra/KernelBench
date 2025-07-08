@@ -8,12 +8,13 @@ from __future__ import annotations
 import asyncio
 from enum import Enum
 from textwrap import dedent
-from typing import Any
+from typing import Any, List, Set
+import hashlib
 
 from inspect_ai import Task, task
-from inspect_ai.agent import react, agent, Agent, AgentState, AgentAttempts
+from inspect_ai.agent import react, agent, Agent, AgentState, AgentAttempts, MessageFilter
 from inspect_ai.dataset import FieldSpec, hf_dataset
-from inspect_ai.model import CachePolicy, get_model
+from inspect_ai.model import trim_messages, ChatMessage
 from inspect_ai.solver import (
     chain,
     solver,
@@ -282,6 +283,81 @@ THINK_SYSTEM_MESSAGE = system_message(
     )
 )
 
+# ---------------------------------------------------------------------------
+# Context-window guard-rail: keep system + user, hash-compress old code dumps
+# ---------------------------------------------------------------------------
+
+# ----- helper ----------------------------------------------------------------
+def _sha(text: str, n: int = 10) -> str:
+    return hashlib.sha256(text.encode()).hexdigest()[:n]
+
+def build_pruner(
+    *,
+    hash_dumps: bool = False,
+    keep_all_summaries: bool = True,
+    dump_tools: Set[str] | None = None,
+    max_ctx_tokens: int = 130_000,
+    preserve_ratio: float = 0.70,
+):
+    """
+    hash_dumps          – hash-compress stale tool dumps
+    keep_all_summaries  – True → keep every “[SUMMARY]: …” message
+                          False (default) → keep only the newest one
+    dump_tools          – names of tools whose outputs can be huge
+    max_ctx_tokens      – per-request ceiling (< model ctx window)
+    preserve_ratio      – 0.0-1.0 fraction to keep when over limit
+    """
+
+    if dump_tools is None:
+        dump_tools = {
+            "text_editor", "file_write",
+            "text_editor.read", "text_editor.write",
+            "file_read",
+        }
+
+    async def prune(messages: List["ChatMessage"]) -> List["ChatMessage"]:
+        # indices we must preserve
+        last_dump = max(
+            (i for i, m in enumerate(messages)
+             if m.tool_name in dump_tools and m.role == "assistant"),
+            default=None,
+        )
+        summaries = [
+            i for i, m in enumerate(messages)
+            if m.role == "assistant"
+            and isinstance(m.content_text, str)
+            and m.content_text.lstrip().startswith("[SUMMARY]:")
+        ]
+        keep_summary_set = set(summaries if keep_all_summaries else summaries[-1:])
+
+        kept = []
+        for idx, msg in enumerate(messages):
+            # always keep system, user, and *tool* role messages
+            if msg.role in {"system", "user", "tool"}:
+                kept.append(msg)
+                continue
+
+            # keep selected assistant messages
+            if idx == last_dump or idx in keep_summary_set:
+                kept.append(msg)
+                continue
+
+            # hash-compress stale dumps if enabled
+            if (hash_dumps and msg.tool_name in dump_tools
+                    and msg.role == "assistant"):
+                placeholder = f"<SHA256:{_sha(msg.content_text)}:{len(msg.content_text)}B>"
+                kept.append(msg._replace(content_text=placeholder))
+                continue
+            # else: drop the assistant message entirely
+
+        # fail-safe trim if still too large
+        from inspect_ai.model import count_tokens
+        if count_tokens(kept) > max_ctx_tokens:
+            kept = trim_messages(kept, preserve=preserve_ratio)
+
+        return kept
+
+    return prune
 
 # -----------------------------------------------------------------------------
 # ReAct agent (tool loop) ------------------------------------------------------
@@ -309,6 +385,7 @@ react_agent = react(
         incorrect_message=incorrect_message,
     ),
     # model=cached_model,  # per‑call caching
+    truncation=build_pruner(),
 )
 
 
@@ -350,6 +427,7 @@ def kernelbench_task() -> Task:
 
     return Task(
         dataset=dataset,
+        token_limit=500_000,
         solver=kernelbench_solver(),
         sandbox="docker",
         scorer=kernelbench_score(),
