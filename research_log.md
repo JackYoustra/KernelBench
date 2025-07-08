@@ -9,11 +9,11 @@ We propose a novel approach to automated GPU kernel optimization that fundamenta
 ### 1.1 Current State of Automated Kernel Engineering
 
 Recent advances in automated kernel engineering have shown promising results:
-- **METR's KernelAgent** achieves 1.8x average speedup using parallel tree search
-- **Cognition AI's Kevin-32B** demonstrates 65% correctness with multi-turn RL
-- **Sakana AI's CUDA Engineer** claims 10-100x improvements through evolutionary optimization
+- **METR's KernelAgent** achieves 1.8x average speedup using parallel tree search. No ncu, no RL.
+- **Cognition AI's Kevin-32B** demonstrates 65% correctness with multi-turn RL BUT no ncu.
+- **Sakana AI's CUDA Engineer** claims 10-100x improvements through evolutionary optimization. No RL.
 
-However, all existing approaches share a fundamental limitation: they operate with minimal feedback, essentially conducting blind search in the space of possible kernels.
+I want to do ncu + RL, as well as some other crafty RL techniques.
 
 ### 1.2 The Insight
 
