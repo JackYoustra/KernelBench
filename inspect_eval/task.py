@@ -12,7 +12,8 @@ from typing import Any, List, Set
 import hashlib
 
 from inspect_ai import Task, task
-from inspect_ai.agent import react, agent, Agent, AgentState, AgentAttempts, MessageFilter
+from inspect_ai.agent import react, AgentState, AgentAttempts
+from inspect_ai.agent._types import ValueToFloat
 from inspect_ai.dataset import FieldSpec, hf_dataset
 from inspect_ai.model import trim_messages, ChatMessage
 from inspect_ai.solver import (
@@ -23,8 +24,8 @@ from inspect_ai.solver import (
     TaskState,
     Solver,
 )
-from inspect_ai.scorer import Score, Target, Scorer, scorer, accuracy, metric, Metric, SampleScore
-from inspect_ai.tool import bash, text_editor, think, web_search, Tool
+from inspect_ai.scorer import Score, Target, Scorer, scorer, accuracy, metric, Metric, SampleScore, Value
+from inspect_ai.tool import bash, text_editor, think, web_search
 from inspect_ai.util import sandbox
 import numpy as np
 
@@ -49,13 +50,20 @@ def mean_runtime_of_passes() -> Metric:
     """Average runtime across *successful* samples (ignores failures)."""
 
     def _metric(samples: list[SampleScore]) -> float:
-        # When using metrics dict, the system extracts the specific key value
-        # so s.score.value will be the runtime value (float or None), not the full dict
-        runtimes = [
-            s.score.value
-            for s in samples
-            if isinstance(s.score.value, (int, float)) and s.score.value is not None
-        ]
+        # Extract runtime values, handling both dict and scalar cases
+        runtimes = []
+        for s in samples:
+            value = s.score.value
+
+            # Handle dictionary case - extract the 'runtime' key
+            if isinstance(value, dict):
+                runtime_val = value.get("runtime")
+                if isinstance(runtime_val, (int, float)) and runtime_val is not None:
+                    runtimes.append(runtime_val)
+            # Handle scalar case (when value is already extracted)
+            elif isinstance(value, (int, float)) and value is not None:
+                runtimes.append(value)
+
         return float(np.mean(runtimes)) if runtimes else float("nan")
 
     return _metric
@@ -63,9 +71,24 @@ def mean_runtime_of_passes() -> Metric:
 
 # -- scorer factory -----------------------------------------------------------
 
+def _pass_metric(x: Value) -> float:
+    if isinstance(x, dict):
+        return x.get("pass", 0)
+    elif isinstance(x, str):
+        return 1 if x == "ok" else 0
+    elif isinstance(x, int):
+        return x
+    elif isinstance(x, float):
+        return x
+    else:
+        print(f"Unknown value type: {type(x)} for pass metric {x}")
+        return 0
+
+pass_metric: ValueToFloat = _pass_metric
+
 @scorer(
     metrics={
-        "pass": [accuracy()],
+        "pass": [accuracy(pass_metric)],
         "runtime": [mean_runtime_of_passes()],
     }
 )
@@ -221,7 +244,8 @@ def cudaify_prompt() -> Solver:
 # -----------------------------------------------------------------------------
 # Cached model wrapper ---------------------------------------------------------
 # -----------------------------------------------------------------------------
-
+# I hacked the dep file for now :p
+# probably shoudln't
 
 # @agent
 # def cached_model(state: AgentState, tools: list[Tool]) -> Agent:
@@ -383,6 +407,7 @@ react_agent = react(
     attempts=AgentAttempts(
         attempts=5,
         incorrect_message=incorrect_message,
+        score_value=pass_metric,
     ),
     # model=cached_model,  # per‑call caching
     truncation=build_pruner(),
