@@ -203,7 +203,7 @@ def cudaify_prompt() -> Solver:
     # ORIGINAL wording preserved verbatim
     problem_instruction = dedent(
         """
-        Optimize the architecture named Model with custom CUDA operators! Name your optimized output architecture ModelNew. Output the new code in a file called model_new.py in the directory that your shell (and file IO tool) starts in - so writing to `model_new.py` will write to the correct file, while writing elsewhere (such as top level) will not.
+        Optimize the architecture named Model with custom CUDA operators! Name your optimized output architecture ModelNew. Output the new code in a file called /workspace/model_new.py in the directory that your shell (and file IO tool) starts in. Note that your file IO tool can't take relative paths, you must write to the absolute path.  - so writing to `/workspace/model_new.py` will write to the correct file. You start in the `/workspace` directory.
         """
     )
 
