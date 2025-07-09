@@ -137,6 +137,10 @@ def kernelbench_score() -> Scorer:
             custom_cuda = contents
 
         
+        # log the submission in the metadata
+        state.metadata["submission_count"] = state.metadata.get("submission_count", 0) + 1
+        metadata[f"submission_{state.metadata['submission_count']}"] = custom_cuda
+
         ref_arch_src = state.metadata["code"]
         print("ref_arch_src")
         print(ref_arch_src)
