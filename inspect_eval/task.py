@@ -10,9 +10,12 @@ from enum import Enum
 from textwrap import dedent
 from typing import Any, List, Set
 import hashlib
+import os
+import json
+from functools import lru_cache
 
 from inspect_ai import Task, task
-from inspect_ai.agent import react, AgentState, AgentAttempts, MessageFilter
+from inspect_ai.agent import react, AgentState, AgentAttempts, MessageFilter, Agent
 from inspect_ai.agent._types import ValueToFloat
 from inspect_ai.dataset import FieldSpec, hf_dataset
 from inspect_ai.model import trim_messages, ChatMessage
@@ -28,10 +31,74 @@ from inspect_ai.scorer import Score, Target, Scorer, scorer, accuracy, metric, M
 from inspect_ai.tool import bash, text_editor, think, web_search
 from inspect_ai.util import sandbox
 import numpy as np
+import polars as pl
+from pathlib import Path
 
 from src.eval import locked_eval_kernel_against_ref
 from src.prompt_constructor import prompt_generate_custom_cuda_from_prompt_template
 from src.utils import extract_first_code, set_gpu_arch
+
+# -----------------------------------------------------------------------------
+# Load Baseline Data ----------------------------------------------------------
+# -----------------------------------------------------------------------------
+
+@lru_cache
+def load_timing_data() -> pl.DataFrame:
+    """Load all timing files into a single polars DataFrame"""
+    BASELINE_FOLDER = os.environ.get("KERNELBENCH_BASELINE_FOLDER", "results/timing/")
+    
+    all_data = []
+    
+    # Walk through all JSON files in all subdirectories  
+    for json_file in Path(BASELINE_FOLDER).rglob("*.json"):
+        # Extract config from parent directory name
+        config = json_file.parent.name
+        
+        with open(json_file) as f:
+            data = json.load(f)
+        
+        # Flatten each level into separate records
+        for level_key, level_data in data.items():
+            if level_key.startswith('level'):
+                level_num = int(level_key[5:])  # Extract number from 'levelN'
+                
+                for name, timing_data in level_data.items():
+                    # Each measurement becomes a row
+                    all_data.append({
+                        'level': level_num,
+                        'name': name,
+                        'config': config,
+                        'file': json_file.name,
+                        # type is name without the extension and without "baseline_time" at the start
+                        'type': name.replace("baseline_time_", "").replace(".json", ""),
+                        **timing_data  # mean, std, min, max, num_trials, hardware, device
+                    })
+    
+    # Create DataFrame first to run checks on it
+    df = pl.DataFrame(all_data)
+    
+    # checks!
+    # assert that there are no duplicates with polars
+    assert df.select(pl.col("level", "name", "type")).unique().height == df.height
+
+    # assert that each sample that exists in one exists in all configs
+    # Get all unique (level, name) pairs and all unique configs
+    level_name_pairs = df.select(pl.col("level", "name")).unique()
+    all_configs = df.select("config").unique().get_column("config").to_list()
+    
+    # For each (level, name) pair, ensure it exists in all configs
+    for row in level_name_pairs.iter_rows(named=True):
+        level, name = row["level"], row["name"]
+        existing_configs = df.filter(
+            (pl.col("level") == level) & (pl.col("name") == name)
+        ).select("config").unique().get_column("config").to_list()
+        
+        missing_configs = set(all_configs) - set(existing_configs)
+        assert not missing_configs, f"Sample (level={level}, name={name}) missing configs: {missing_configs}"
+    
+    return df
+
+baselines = load_timing_data()
 
 # -----------------------------------------------------------------------------
 # Scorer ----------------------------------------------------------------------
@@ -84,7 +151,11 @@ def _pass_metric(x: Value) -> float:
         print(f"Unknown value type: {type(x)} for pass metric {x}")
         return 0
 
+def _always_fail_metric(x: Value) -> float:
+    return 0
+
 pass_metric: ValueToFloat = _pass_metric
+always_fail_metric: ValueToFloat = _always_fail_metric
 
 @scorer(
     metrics={
@@ -171,8 +242,39 @@ def kernelbench_score() -> Scorer:
             return _result(KernelBenchScoreType.NOT_COMPILES, metadata=metadata)
         if not result.correctness:
             return _result(KernelBenchScoreType.NOT_CORRECT, metadata=metadata)
+        
+        metadata["absolute_runtime"] = result.runtime
 
-        return _result(result.runtime)
+        # we have the absolute runtime
+        # we want to adjust it to be relative to the reference
+        # Calculate speedup using precomputed baseline
+        level = state.metadata["level"]
+        name = state.metadata["name"]
+
+        assert level is not None and name is not None
+
+        # log every baseline type to metadata
+        baseline_rows = baselines.filter(pl.col("level") == level, pl.col("name") == name)
+        
+        # Log each baseline mean
+        baseline_means = []
+        for row in baseline_rows.iter_rows(named=True):
+            baseline_type = row["type"]
+            baseline_mean = row["mean"]
+            
+            # Log just the mean for each baseline type
+            metadata[f"baseline_{baseline_type}_mean"] = baseline_mean
+            baseline_means.append(baseline_mean)
+
+        # Use the best (lowest) baseline time for speedup calculation
+        best_baseline_time = min(baseline_means)
+        kernel_time = result.runtime
+        assert best_baseline_time > 0 and kernel_time > 0
+        
+        speedup = best_baseline_time / kernel_time
+        metadata["speedup_best_torch"] = speedup
+        metadata["best_baseline_time"] = best_baseline_time
+        return _result(speedup, metadata=metadata)
 
     return _score
 
@@ -181,8 +283,26 @@ async def incorrect_message(state: AgentState, scores: list[Score]) -> str:
     last_value = scores[-1].value
     last_metadata = scores[-1].metadata
     if last_value["pass"] == 1:
-        # ???
-        return generic_error_message
+        # Agent success message with detailed runtime feedback
+        runtime = last_metadata["absolute_runtime"]
+        speedup = last_metadata["speedup_best_torch"]
+        best_baseline = last_metadata["best_baseline_time"]
+        
+        # Collect all baseline runtimes
+        baseline_runtimes = []
+        for key, value in last_metadata.items():
+            if key.startswith("baseline_") and key.endswith("_mean"):
+                baseline_type = key.replace("baseline_", "").replace("_mean", "")
+                baseline_runtimes.append(f"{baseline_type}: {value:.6f}s")
+        
+        baseline_summary = ", ".join(baseline_runtimes) if baseline_runtimes else "no baselines found"
+        
+        return (f"Your submission is correct! You achieved {runtime:.6f}s runtime. "
+                f"The baseline runtimes are [{baseline_summary}] for a total score of "
+                f"{speedup:.2f}x improvement when compared against the best baseline "
+                f"runtime of {best_baseline:.6f}s. Attempt to improve your runtime further."
+                "Available at your disposal are making your own quick tests by running the code in python, using ncu, using the torch profiler, using clang tidy (and other profiling tools, of course) and, of course, using your own thinking."
+        )
     else:
         def errors_to_string() -> str:
             # grab compile error
@@ -290,6 +410,7 @@ NORMAL_SYSTEM_MESSAGE = system_message(
         Associated images found in the md are also in the /materials/conversion_results/ directory.
         Reference it to help you. You also have access to the internet if need be, and can use wget or curl in conjunction with your internet searches.
         You can perform any activities that you want in the contianer, including profiling, testing, reading, etc.
+        Note that your bash tool has a limited context window. It may make sense to pipe the output of potentially large commands (such as, but not including, profilers) to a file and then read, grep, or perform other operations on the file.
         """
     )
 )
@@ -400,21 +521,36 @@ search_tool = web_search({
 })
 
 # We rely on the system messages above; no additional prompt needed.
-react_agent = react(
-    tools=[
-        bash(timeout=300),
-        text_editor(timeout=300),
-        think(),
-        search_tool,
-    ],
-    attempts=AgentAttempts(
-        attempts=5,
-        incorrect_message=incorrect_message,
-        score_value=pass_metric,
-    ),
-    # model=cached_model,  # per‑call caching
-    truncation=build_pruner(),
-)
+def react_agent(attempt_runtime_improvement: bool = False) -> Agent:
+    """
+    attempt_runtime_improvement: if True, the agent will attempt to improve the runtime of the previous attempt (always fails for the purposes of the react agent).
+    """
+
+    if attempt_runtime_improvement:
+        attempts = AgentAttempts(
+            attempts=15,
+            incorrect_message=incorrect_message,
+            score_value=always_fail_metric,
+        )
+    else:
+        attempts = AgentAttempts(
+            attempts=5,
+            incorrect_message=incorrect_message,
+            score_value=pass_metric,
+        )
+
+    react_agent = react(
+        tools=[
+            bash(timeout=300),
+            text_editor(timeout=300),
+            think(),
+            search_tool,
+        ],
+        attempts=attempts,
+        # model=cached_model,  # per‑call caching
+        truncation=build_pruner(),
+    )
+    return react_agent
 
 
 # -----------------------------------------------------------------------------
@@ -430,7 +566,7 @@ def kernelbench_solver() -> Solver:
         NORMAL_SYSTEM_MESSAGE,
         THINK_SYSTEM_MESSAGE,
         cudaify_prompt(),
-        react_agent,
+        react_agent(),
     )
 
 
@@ -452,6 +588,21 @@ def kernelbench_task() -> Task:
             metadata=["name", "level", "code"],
         ),
     )
+
+    # Verify every dataset sample has timing data
+    for sample in dataset:
+        level = sample.metadata["level"]
+        name = sample.metadata["name"]
+        
+        # Check if this sample exists in baselines
+        matching_baselines = baselines.filter(
+            (pl.col("level") == level) & (pl.col("name") == name)
+        )
+        
+        assert matching_baselines.height > 0, (
+            f"Dataset sample (level={level}, name={name}) not found in timing baselines. "
+            f"Available baselines: {baselines.select('level', 'name').unique().to_pandas().to_string()}"
+        )
 
     return Task(
         dataset=dataset,

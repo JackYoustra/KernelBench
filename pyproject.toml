@@ -21,6 +21,7 @@ dependencies = [
   "litellm",
   "inspect-ai>=0.3.112",
   "pytest-asyncio",
+  "polars",
 ]
 
 [project.optional-dependencies]
