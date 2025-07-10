@@ -42,6 +42,12 @@ from src.utils import extract_first_code, set_gpu_arch
 # Load Baseline Data ----------------------------------------------------------
 # -----------------------------------------------------------------------------
 
+
+def removePyAtTheEnd(name: str) -> str:
+    if name.endswith(".py"):
+        return name[:-3]
+    return name
+
 @lru_cache
 def load_timing_data() -> pl.DataFrame:
     """Load all timing files into a single polars DataFrame"""
@@ -73,7 +79,7 @@ def load_timing_data() -> pl.DataFrame:
 
                     all_data.append({
                         'level': level_num,
-                        'name': name,
+                        'name': removePyAtTheEnd(name),
                         'config': config,
                         'file': json_file.name,
                         # type is name without the extension and without "baseline_time" at the start
@@ -605,7 +611,7 @@ def kernelbench_solver() -> Solver:
 @task
 def kernelbench_task(
     level: str = "level_2",
-    name: list[str] | None = None,
+    script_names: list[str] | None = None,
 ) -> Task:
     """Return the KernelBench Task object."""
 
@@ -620,8 +626,8 @@ def kernelbench_task(
     )
 
     # Filter by name if specified
-    if name is not None:
-        dataset = [sample for sample in dataset if sample.metadata["name"] in name]
+    if script_names is not None:
+        dataset = [sample for sample in dataset if sample.metadata["name"] in script_names]
 
     # Verify every dataset sample has timing data
     for sample in dataset:
@@ -635,7 +641,7 @@ def kernelbench_task(
         
         assert matching_baselines.height > 0, (
             f"Dataset sample (level={level}, name={name}) not found in timing baselines. "
-            f"Available baselines: {baselines.select('level', 'name').unique().to_pandas().to_string()}"
+            f"Available baselines:\n{baselines.select('level', 'name').unique().to_pandas().to_string()}"
         )
 
     return Task(
