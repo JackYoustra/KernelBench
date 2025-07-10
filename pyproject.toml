@@ -20,6 +20,7 @@ dependencies = [
   "einops",
   "litellm",
   "inspect-ai>=0.3.112",
+  "pytest-asyncio",
 ]
 
 [project.optional-dependencies]
