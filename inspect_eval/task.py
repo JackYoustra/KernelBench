@@ -12,7 +12,7 @@ from typing import Any, List, Set
 import hashlib
 
 from inspect_ai import Task, task
-from inspect_ai.agent import react, AgentState, AgentAttempts
+from inspect_ai.agent import react, AgentState, AgentAttempts, MessageFilter
 from inspect_ai.agent._types import ValueToFloat
 from inspect_ai.dataset import FieldSpec, hf_dataset
 from inspect_ai.model import trim_messages, ChatMessage
@@ -136,7 +136,6 @@ def kernelbench_score() -> Scorer:
             # just grab the contents of the file
             custom_cuda = contents
 
-        
         # log the submission in the metadata
         state.metadata["submission_count"] = state.metadata.get("submission_count", 0) + 1
         metadata[f"submission_{state.metadata['submission_count']}"] = custom_cuda
@@ -326,7 +325,7 @@ def build_pruner(
     dump_tools: Set[str] | None = None,
     max_ctx_tokens: int = 130_000,
     preserve_ratio: float = 0.70,
-):
+) -> MessageFilter:
     """
     hash_dumps          – hash-compress stale tool dumps
     keep_all_summaries  – True → keep every “[SUMMARY]: …” message
@@ -343,7 +342,7 @@ def build_pruner(
             "file_read",
         }
 
-    async def prune(messages: List["ChatMessage"]) -> List["ChatMessage"]:
+    async def prune(messages: List[ChatMessage]) -> List[ChatMessage]:
         # indices we must preserve
         last_dump = max(
             (i for i, m in enumerate(messages)
