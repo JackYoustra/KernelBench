@@ -90,7 +90,7 @@ class KernelExecResult(BaseModel):
 
 # make a result for original failure / note to skip
 # just have it be a sentinel
-class OriginalFailureResult(BaseModel):
+class OriginalFailureResult(BaseException):
     pass
 
 def load_original_model_and_inputs(
@@ -140,10 +140,11 @@ def load_custom_model(
         exec(model_custom_src, context)
         # DANGER: need to delete refernece from global namespace
     except SyntaxError as e:
-        print(f"Syntax Error in custom generated code or Compilation Error {e}")
-        return None
+        raise RuntimeError(f"{e}")
 
     ModelNew = context.get("ModelNew")
+    if ModelNew is None:
+        raise RuntimeError("ModelNew is not defined in the custom model code")
     return ModelNew
 
 
@@ -464,6 +465,8 @@ def eval_kernel_against_ref(
     graceful_eval_cleanup(context, device)
     return kernel_exec_result
 
+from typing import Optional
+
 async def locked_eval_kernel_against_ref(
     original_model_src: str,
     custom_model_src: str,
@@ -473,7 +476,7 @@ async def locked_eval_kernel_against_ref(
     verbose: bool = False,
     measure_performance: bool = False,
     build_dir: os.PathLike = None,
-    gpu_semaphore: asyncio.Semaphore = None,
+    gpu_semaphore: Optional[asyncio.Semaphore] = None,
     device: torch.device = torch.cuda.current_device() if torch.cuda.is_available() else None, # have to run on GPU
 ) -> KernelExecResult:
     """
@@ -535,8 +538,7 @@ async def locked_eval_kernel_against_ref(
         graceful_eval_cleanup(context, device)
         return KernelExecResult(compiled=False, metadata=metadata)
 
-    # at this point we passed compilation
-    async with gpu_semaphore:
+    async def locked():
         try:
             with torch.no_grad():
                 set_seed(seed_num)  # set seed for reproducible weights
@@ -616,6 +618,13 @@ async def locked_eval_kernel_against_ref(
 
         graceful_eval_cleanup(context, device)
         return kernel_exec_result
+
+    # at this point we passed compilation
+    if gpu_semaphore is not None:
+        async with gpu_semaphore:
+            return await locked()
+    else:
+        return await locked()
 
 
 def register_and_format_exception(
