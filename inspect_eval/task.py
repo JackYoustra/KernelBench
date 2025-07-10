@@ -45,12 +45,15 @@ from src.utils import extract_first_code, set_gpu_arch
 @lru_cache
 def load_timing_data() -> pl.DataFrame:
     """Load all timing files into a single polars DataFrame"""
-    BASELINE_FOLDER = os.environ.get("KERNELBENCH_BASELINE_FOLDER", "results/timing/")
-    
+    path = Path(__file__).parent.parent / "results" / "timing" / "5090"
+    BASELINE_FOLDER = os.environ.get("KERNELBENCH_BASELINE_FOLDER", path)
+    if isinstance(BASELINE_FOLDER, str):
+        BASELINE_FOLDER = Path(BASELINE_FOLDER)
+
     all_data = []
     
     # Walk through all JSON files in all subdirectories  
-    for json_file in Path(BASELINE_FOLDER).rglob("*.json"):
+    for json_file in BASELINE_FOLDER.rglob("*.json"):
         # Extract config from parent directory name
         config = json_file.parent.name
         
@@ -64,13 +67,17 @@ def load_timing_data() -> pl.DataFrame:
                 
                 for name, timing_data in level_data.items():
                     # Each measurement becomes a row
+                    if timing_data is None:
+                        print(f"DEBUG: Timing data is None for {name}")
+                        continue
+
                     all_data.append({
                         'level': level_num,
                         'name': name,
                         'config': config,
                         'file': json_file.name,
                         # type is name without the extension and without "baseline_time" at the start
-                        'type': name.replace("baseline_time_", "").replace(".json", ""),
+                        'type': json_file.name.replace("baseline_time_", "").replace(".json", ""),
                         **timing_data  # mean, std, min, max, num_trials, hardware, device
                     })
     
@@ -79,7 +86,27 @@ def load_timing_data() -> pl.DataFrame:
     
     # checks!
     # assert that there are no duplicates with polars
-    assert df.select(pl.col("level", "name", "type")).unique().height == df.height
+    unique_combinations = df.select(pl.col("level", "name", "type")).unique()
+    if unique_combinations.height != df.height:
+        # Find duplicates for debugging
+        duplicates = df.group_by(["level", "name", "type"]).len().filter(pl.col("len") > 1)
+        print("Duplicate combinations found:")
+        print(duplicates)
+        
+        # Show the actual duplicate rows
+        for row in duplicates.iter_rows(named=True):
+            level, name, type_val = row["level"], row["name"], row["type"]
+            duplicate_rows = df.filter(
+                (pl.col("level") == level) & 
+                (pl.col("name") == name) & 
+                (pl.col("type") == type_val)
+            )
+            print(f"\nDuplicate rows for level={level}, name={name}, type={type_val}:")
+            print(duplicate_rows)
+        
+        assert False, f"Found {df.height - unique_combinations.height} duplicate rows"
+    
+    assert unique_combinations.height == df.height
 
     # assert that each sample that exists in one exists in all configs
     # Get all unique (level, name) pairs and all unique configs
@@ -576,18 +603,25 @@ def kernelbench_solver() -> Solver:
 
 
 @task
-def kernelbench_task() -> Task:
+def kernelbench_task(
+    level: str = "level_2",
+    name: list[str] | None = None,
+) -> Task:
     """Return the KernelBench Task object."""
 
     dataset = hf_dataset(
         "ScalingIntelligence/KernelBench",
-        split="level_2",
+        split=level,
         sample_fields=FieldSpec(
             input="code",
             id="problem_id",
             metadata=["name", "level", "code"],
         ),
     )
+
+    # Filter by name if specified
+    if name is not None:
+        dataset = [sample for sample in dataset if sample.metadata["name"] in name]
 
     # Verify every dataset sample has timing data
     for sample in dataset:
