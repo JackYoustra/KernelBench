@@ -22,6 +22,7 @@ dependencies = [
   "inspect-ai>=0.3.112",
   "pytest-asyncio",
   "polars",
+  "ipykernel",
 ]
 
 [project.optional-dependencies]
@@ -50,4 +51,4 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]            # let setuptools discover the top-level dir “src”
-packages = ["src"]           # simplest because your top folder really *is* the package
+packages = ["src", "inspect_eval"]           # simplest because your top folder really *is* the package
