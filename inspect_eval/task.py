@@ -17,7 +17,7 @@ from functools import lru_cache
 from inspect_ai import Task, task
 from inspect_ai.agent import react, AgentState, AgentAttempts, MessageFilter, Agent
 from inspect_ai.agent._types import ValueToFloat
-from inspect_ai.dataset import FieldSpec, hf_dataset
+from inspect_ai.dataset import Dataset, FieldSpec, hf_dataset
 from inspect_ai.model import trim_messages, ChatMessage
 from inspect_ai.solver import (
     chain,
@@ -592,14 +592,14 @@ def react_agent(attempt_runtime_improvement: bool = False) -> Agent:
 
 
 @solver
-def kernelbench_solver() -> Solver:
+def kernelbench_solver(attempt_runtime_improvement: bool = False) -> Solver:
     """Compose original system guidance, prompt mutation, and the ReAct loop."""
 
     return chain(
         NORMAL_SYSTEM_MESSAGE,
         THINK_SYSTEM_MESSAGE,
         cudaify_prompt(),
-        react_agent(),
+        react_agent(attempt_runtime_improvement=attempt_runtime_improvement),
     )
 
 
@@ -612,18 +612,21 @@ def kernelbench_solver() -> Solver:
 def kernelbench_task(
     level: str = "level_2",
     script_names: list[str] | None = None,
+    attempt_runtime_improvement: bool = False,
+    dataset: Dataset | None = None,
 ) -> Task:
     """Return the KernelBench Task object."""
 
-    dataset = hf_dataset(
-        "ScalingIntelligence/KernelBench",
-        split=level,
-        sample_fields=FieldSpec(
-            input="code",
-            id="problem_id",
-            metadata=["name", "level", "code"],
-        ),
-    )
+    if dataset is None:
+        dataset = hf_dataset(
+            "ScalingIntelligence/KernelBench",
+            split=level,
+            sample_fields=FieldSpec(
+                input="code",
+                id="problem_id",
+                metadata=["name", "level", "code"],
+            ),
+        )
 
     # Filter by name if specified
     if script_names is not None:
@@ -647,7 +650,7 @@ def kernelbench_task(
     return Task(
         dataset=dataset,
         token_limit=500_000,
-        solver=kernelbench_solver(),
+        solver=kernelbench_solver(attempt_runtime_improvement=attempt_runtime_improvement),
         sandbox="docker",
         scorer=kernelbench_score(),
     )
