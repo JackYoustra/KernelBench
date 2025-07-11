@@ -12,6 +12,7 @@ Recent advances in automated kernel engineering have shown promising results:
 - **METR's KernelAgent** achieves 1.8x average speedup using parallel tree search. No ncu, no RL.
 - **Cognition AI's Kevin-32B** demonstrates 65% correctness with multi-turn RL BUT no ncu.
 - **Sakana AI's CUDA Engineer** claims 10-100x improvements through evolutionary optimization. No RL.
+- **Meta KernelLLM** https://huggingface.co/facebook/KernelLLM, fine-tuned on (torch, triton) pairs, no apparent RL loop. 
 
 I want to do ncu + RL, as well as some other crafty RL techniques.
 
@@ -227,3 +228,7 @@ I'm thinking it's something like leverage Qwen-3 235 B for cost-efficient, on-po
 so we're probably going to want to do predominantly 235B.
 
 Okay. Now that I've got the full ReAct loop working, I think it's time to read the sakana paper very closely and see what they did and what we should adapt from the blog posts before we let 'er rip.
+
+On reasoning:
+https://chatgpt.com/share/687072dd-b748-8012-9f17-6c049bf9d7b5
+
