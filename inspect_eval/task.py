@@ -352,7 +352,7 @@ async def incorrect_message(state: AgentState, scores: list[Score]) -> str:
             return thing
         
         def mismatch_to_string() -> str:
-            mismatch = last_metadata['correctness_issue']
+            mismatch = last_metadata['correctness_issue'] if 'correctness_issue' in last_metadata else None
             thing = ""
             if mismatch:
                 thing += f"\nCorrectness Issue: {mismatch}\n"
@@ -582,9 +582,17 @@ def react_agent(attempt_runtime_improvement: bool = False) -> Agent:
         attempts=attempts,
         # model=cached_model,  # per‑call caching
         truncation=build_pruner(),
+        on_continue="Please proceed to the next step using your best judgement and the tools at your disposal. If you believe you have completed the task, please call the `{submit}()` tool with your final answer. Call it with a summary of your reasoning that led you to this submission in less than 100 words."
     )
     return react_agent
 
+@solver  
+def force_tool_choice() -> Solver:
+    """Set tool_choice to 'any' before running react agent."""
+    async def solve(state: TaskState, generate: Generate) -> TaskState:
+        state.tool_choice = "any"
+        return state
+    return solve
 
 # -----------------------------------------------------------------------------
 # Top‑level solver chain -------------------------------------------------------
@@ -599,6 +607,7 @@ def kernelbench_solver(attempt_runtime_improvement: bool = False) -> Solver:
         NORMAL_SYSTEM_MESSAGE,
         THINK_SYSTEM_MESSAGE,
         cudaify_prompt(),
+        force_tool_choice(),
         react_agent(attempt_runtime_improvement=attempt_runtime_improvement),
     )
 
