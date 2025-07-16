@@ -15,7 +15,8 @@ import json
 from functools import lru_cache
 
 from inspect_ai import Task, task
-from inspect_ai.agent import react, AgentState, AgentAttempts, MessageFilter, Agent
+from inspect_ai._util.content import ContentReasoning
+from inspect_ai.agent import AgentContinue, AgentState, AgentAttempts, MessageFilter, Agent
 from inspect_ai.agent._types import ValueToFloat
 from inspect_ai.dataset import Dataset, FieldSpec, hf_dataset
 from inspect_ai.model import trim_messages, ChatMessage
@@ -34,6 +35,7 @@ import numpy as np
 import polars as pl
 from pathlib import Path
 
+from inspect_eval._react import react
 from src.eval import locked_eval_kernel_against_ref
 from src.prompt_constructor import prompt_generate_custom_cuda_from_prompt_template
 from src.utils import extract_first_code, set_gpu_arch
@@ -171,6 +173,77 @@ def mean_runtime_of_passes() -> Metric:
 
 # -- scorer factory -----------------------------------------------------------
 
+# -----------------------------------------------------------------------------+
+#  Early‑stop metric: halt when speed‑up gains < ε for *patience* submissions  +
+# -----------------------------------------------------------------------------+
+
+def improving_metric(epsilon: float = 0.02, patience: int = 2) -> ValueToFloat:
+    """
+    Return a ValueToFloat that maps the Score.value dict to 1.0 (=> stop) once
+    relative improvement in 'speedup' is below `epsilon` for `patience` tries.
+    """
+
+    best: float = 0.0          # non‑local state captured in closure
+    flat: int = 0
+
+    def _metric(v: Value) -> float:        # runs after each submission
+        nonlocal best, flat
+        if isinstance(v, dict) and v.get("pass") == 1:
+            cur = float(v.get("speedup", 0.0))
+            if cur >= best * (1 + epsilon):
+                best = cur
+                flat = 0                   # reset patience counter
+                return 0.0                 # keep iterating
+            else:
+                flat += 1
+                if flat >= patience:
+                    return 1.0             # plateau → stop
+        # not correct yet → keep going
+        return 0.0
+
+    return _metric
+
+def kevin_pruner() -> MessageFilter:
+    """Keep newest reasoning, all summaries & tool output; hash‑shrink dumps."""
+
+    async def _prune(msgs: List[ChatMessage]) -> List[ChatMessage]:
+        latest_reasoning = max(
+            (
+                i
+                for i, m in enumerate(msgs)
+                if m.role == "assistant"
+                and any(isinstance(c, ContentReasoning) for c in m.content)
+            ),
+            default=None,
+        )
+        kept: list[ChatMessage] = []
+        for i, m in enumerate(msgs):
+            if m.role in {"system", "user", "tool"}:
+                kept.append(m)
+                continue
+            if (
+                m.role == "assistant"
+                and any(isinstance(c, ContentReasoning) for c in m.content)
+            ):
+                if i == latest_reasoning:      # keep newest CoT
+                    kept.append(m)
+                continue                       # drop older CoT
+            kept.append(m)                     # summaries / code / feedback
+
+        return kept
+
+    return _prune
+
+
+def prune_each_turn(pruner: MessageFilter) -> AgentContinue:
+    """Run `pruner` after every assistant turn (via on_continue hook)."""
+
+    async def _hook(state: AgentState):
+        state.messages = await pruner(state.messages)
+        return True          # always continue; AgentAttempts decides stopping
+
+    return _hook
+
 def _pass_metric(x: Value) -> float:
     if isinstance(x, dict):
         return x.get("pass", 0)
@@ -207,12 +280,13 @@ def kernelbench_score() -> Scorer:
 
     async def _score(state: TaskState, target: Target) -> Score:  # noqa: D401
         # Helper that auto-derives status/pass/runtime from a single argument
-        def _result(outcome: KernelBenchScoreType | float, metadata: dict[str, Any] | None = None):
+        def _result(outcome: KernelBenchScoreType | float, speedup_val: float | None = None, metadata: dict[str, Any] | None = None):
             if isinstance(outcome, float):
                 return Score(value={
                     "pass": 1,
                     "runtime": outcome,
                     "status": "ok",
+                    "speedup": speedup_val if speedup_val is not None else None,
                 }, metadata=metadata)
             else:
                 return Score(value={
@@ -307,7 +381,16 @@ def kernelbench_score() -> Scorer:
         speedup = best_baseline_time / kernel_time
         metadata["speedup_best_torch"] = speedup
         metadata["best_baseline_time"] = best_baseline_time
-        return _result(speedup, metadata=metadata)
+        # record best‑of‑run flags for audit trail
+        submission_idx = state.metadata.get("submission_count", 0)
+        metadata["attempt_idx"] = submission_idx
+        best_so_far = state.metadata.get("best_speedup", 0.0)
+        is_best = speedup > best_so_far
+        metadata["is_best"] = is_best
+        if is_best:
+            state.metadata["best_speedup"] = speedup
+
+        return _result(speedup, speedup_val=speedup, metadata=metadata)
 
     return _score
 
@@ -396,28 +479,6 @@ def cudaify_prompt() -> Solver:
 
     return solve
 
-
-# -----------------------------------------------------------------------------
-# Cached model wrapper ---------------------------------------------------------
-# -----------------------------------------------------------------------------
-# I hacked the dep file for now :p
-# probably shoudln't
-
-# @agent
-# def cached_model(state: AgentState, tools: list[Tool]) -> Agent:
-#   async def _cached_model() -> AgentState:
-#       """Thin agent that forwards to the evaluation model with an *infinite* cache."""
-
-#       state.output = await get_model().generate(
-#           state.messages,
-#           tools,
-#           cache=CachePolicy(expiry=None),  # never expire cache entries
-#       )
-#       state.messages.append(state.output.message)
-#       return state
-
-#   return _cached_model
-
 # -----------------------------------------------------------------------------
 # System messages (ORIGINAL wording) ------------------------------------------
 # -----------------------------------------------------------------------------
@@ -477,8 +538,6 @@ def build_pruner(
     hash_dumps: bool = False,
     keep_all_summaries: bool = True,
     dump_tools: Set[str] | None = None,
-    max_ctx_tokens: int = 130_000,
-    preserve_ratio: float = 0.70,
 ) -> MessageFilter:
     """
     hash_dumps          – hash-compress stale tool dumps
@@ -529,12 +588,6 @@ def build_pruner(
                 placeholder = f"<SHA256:{_sha(msg.content_text)}:{len(msg.content_text)}B>"
                 kept.append(msg._replace(content_text=placeholder))
                 continue
-            # else: drop the assistant message entirely
-
-        # fail-safe trim if still too large
-        from inspect_ai.model import count_tokens
-        if count_tokens(kept) > max_ctx_tokens:
-            kept = trim_messages(kept, preserve=preserve_ratio)
 
         return kept
 
@@ -559,11 +612,13 @@ def react_agent(attempt_runtime_improvement: bool = False) -> Agent:
     attempt_runtime_improvement: if True, the agent will attempt to improve the runtime of the previous attempt (always fails for the purposes of the react agent).
     """
 
+    pruner = kevin_pruner()
+
     if attempt_runtime_improvement:
         attempts = AgentAttempts(
-            attempts=15,
+            attempts=20,
             incorrect_message=incorrect_message,
-            score_value=always_fail_metric,
+            score_value=improving_metric(epsilon=0.02, patience=2),
         )
     else:
         attempts = AgentAttempts(
@@ -580,9 +635,10 @@ def react_agent(attempt_runtime_improvement: bool = False) -> Agent:
             search_tool,
         ],
         attempts=attempts,
-        # model=cached_model,  # per‑call caching
-        truncation=build_pruner(),
-        on_continue="Please proceed to the next step using your best judgement and the tools at your disposal. If you believe you have completed the task, please call the `{submit}()` tool with your final answer. Call it with a summary of your reasoning that led you to this submission in less than 100 words."
+        # this does truncation if kevin-32b style truncation isn't sufficient. Default cuts last 30% of messages (with some details).
+        truncation="auto",
+        # This does kevin-32b style per-turn pruning
+        on_continue=prune_each_turn(pruner)
     )
     return react_agent
 
